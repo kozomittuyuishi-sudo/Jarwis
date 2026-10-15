@@ -12,7 +12,7 @@ Test plan
  5.  Unit — DirectoryControl.inspect_target() — absolute paths
  6.  Unit — DirectoryControl.inspect_target() — relative / nested paths
  7.  Unit — DirectoryControl.inspect_target() — not-found error
- 8.  PreprocessorBrain end-to-end — "inspect Ag.py" style (relative file)
+ 8.  PreprocessorBrain end-to-end — "inspect Jarwis.py" style (relative file)
  9.  PreprocessorBrain end-to-end — "inspect backup" style (relative dir)
 10.  PreprocessorBrain end-to-end — "inspect ." (active workspace)
 11.  PreprocessorBrain end-to-end — "inspect the current workspace"
@@ -132,7 +132,7 @@ class TestInspectIntentDetection:
         assert self._detect("inspect sample.txt") == Intent.INSPECT
 
     def test_inspect_py_file(self):
-        assert self._detect("inspect Ag.py") == Intent.INSPECT
+        assert self._detect("inspect Jarwis.py") == Intent.INSPECT
 
     def test_inspect_directory(self):
         assert self._detect("inspect backup") == Intent.INSPECT
@@ -150,28 +150,28 @@ class TestInspectIntentDetection:
         assert self._detect("inspect this directory") == Intent.INSPECT
 
     def test_inspect_absolute_file(self):
-        assert self._detect("inspect D:/AG/Ag.py") == Intent.INSPECT
+        assert self._detect("inspect D:/AG/Jarwis.py") == Intent.INSPECT
 
     def test_inspect_absolute_dir(self):
         assert self._detect("inspect D:/AG") == Intent.INSPECT
 
     # "show information about …" variant
     def test_show_information_about_file(self):
-        assert self._detect("show information about Ag.py") == Intent.INSPECT
+        assert self._detect("show information about Jarwis.py") == Intent.INSPECT
 
     def test_show_info_about_file(self):
-        assert self._detect("show info about Ag.py") == Intent.INSPECT
+        assert self._detect("show info about Jarwis.py") == Intent.INSPECT
 
     # "tell me about …" variant
     def test_tell_me_about_file(self):
-        assert self._detect("tell me about Ag.py") == Intent.INSPECT
+        assert self._detect("tell me about Jarwis.py") == Intent.INSPECT
 
     def test_tell_me_about_directory(self):
         assert self._detect("tell me about the backup directory") == Intent.INSPECT
 
     # INSPECT must NOT shadow READ or NAVIGATE
     def test_read_is_not_inspect(self):
-        assert self._detect("read Ag.py") == Intent.READ_FILE
+        assert self._detect("read Jarwis.py") == Intent.READ_FILE
 
     def test_navigate_is_not_inspect(self):
         assert self._detect("go to backup") == Intent.NAVIGATE
@@ -198,8 +198,8 @@ class TestInspectCommandParsing:
         assert cmd.complete
 
     def test_bare_py_file(self):
-        cmd = self._parse("inspect Ag.py")
-        assert cmd.target == "Ag.py"
+        cmd = self._parse("inspect Jarwis.py")
+        assert cmd.target == "Jarwis.py"
 
     def test_bare_directory(self):
         cmd = self._parse("inspect backup")
@@ -223,13 +223,13 @@ class TestInspectCommandParsing:
         assert cmd.target == ACTIVE_WORKSPACE
 
     def test_absolute_windows_path_forward_slash(self):
-        cmd = self._parse("inspect D:/AG/Ag.py")
+        cmd = self._parse("inspect D:/AG/Jarwis.py")
         assert "D:" in cmd.target or "d:" in cmd.target.lower()
-        assert "Ag.py" in cmd.target
+        assert "Jarwis.py" in cmd.target
 
     def test_absolute_windows_path_backslash(self):
-        cmd = self._parse("inspect D:\\AG\\Ag.py")
-        assert "Ag.py" in cmd.target
+        cmd = self._parse("inspect D:\\AG\\Jarwis.py")
+        assert "Jarwis.py" in cmd.target
 
     def test_relative_nested_path(self):
         cmd = self._parse("inspect backup/archived.log")

@@ -150,21 +150,21 @@ except Exception as e:
     FAIL.append("WorkingMemory block")
 
 # ─────────────────────────────────────────────────────────
-# 6. AG startup — import Ag.py directly
+# 6. Jarwis startup — import Jarwis.py directly
 # ─────────────────────────────────────────────────────────
 print("\n[6] AG module import")
 try:
     import importlib.util, pathlib
-    spec = importlib.util.spec_from_file_location("Ag", "Ag.py")
+    spec = importlib.util.spec_from_file_location("Jarwis", "Jarwis.py")
     ag_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ag_module)
-    check("Ag.py loads without error", True)
-    check("Ag.py has main()",          hasattr(ag_module, "main"))
-    check("Ag.py has startup()",       hasattr(ag_module, "startup"))
+    check("Jarwis.py loads without error", True)
+    check("Jarwis.py has main()",          hasattr(ag_module, "main"))
+    check("Jarwis.py has startup()",       hasattr(ag_module, "startup"))
 except Exception as e:
-    print(f"  [ERROR] Ag.py import failed: {e}")
+    print(f"  [ERROR] Jarwis.py import failed: {e}")
     traceback.print_exc()
-    FAIL.append("Ag.py import")
+    FAIL.append("Jarwis.py import")
 
 # ─────────────────────────────────────────────────────────
 # Summary

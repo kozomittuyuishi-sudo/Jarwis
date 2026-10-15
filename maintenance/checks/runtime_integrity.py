@@ -1,6 +1,6 @@
 """
 Runtime Integrity Check
-Verifies: Ag.py startup, runtime chain, module loading,
+Verifies: Jarwis.py startup, runtime chain, module loading,
           configuration loading, environment loading.
 """
 
@@ -12,7 +12,7 @@ from pathlib import Path
 
 # Core runtime modules that must be importable
 RUNTIME_CHAIN = [
-    "Ag",
+    "Jarwis",
     "runtime.runtime_adapter",
     "runtime.introspection",
     "runtime.introspection.introspection_engine",
@@ -74,17 +74,17 @@ def run(project_root: str) -> dict:
     if not env_path.exists():
         issues.append(f"MISSING_ENV: {ENV_FILE}")
 
-    # --- Ag.py startup check (syntax + parseable) ---
-    ag_path = root / "Ag.py"
-    if not ag_path.exists():
-        issues.append("MISSING_ENTRY_POINT: Ag.py not found at project root")
+    # --- Jarwis.py startup check (syntax + parseable) ---
+    entry_path = root / "Jarwis.py"
+    if not entry_path.exists():
+        issues.append("MISSING_ENTRY_POINT: Jarwis.py not found at project root")
     else:
         try:
             import ast
-            source = ag_path.read_text(encoding="utf-8")
+            source = entry_path.read_text(encoding="utf-8")
             ast.parse(source)
         except SyntaxError as exc:
-            issues.append(f"SYNTAX_ERROR_IN_ENTRY: Ag.py — {exc}")
+            issues.append(f"SYNTAX_ERROR_IN_ENTRY: Jarwis.py — {exc}")
 
     return {
         "check": "runtime_integrity",

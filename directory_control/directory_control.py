@@ -17,9 +17,9 @@ Responsibilities
 
 Integration
 -----------
-DirectoryControl is instantiated once in Ag.py and passed through
+DirectoryControl is instantiated once in Jarwis.py and passed through
 process_input() the same way DirectorySession is. The handler function
-_handle_directory_control() in Ag.py dispatches natural-language intents
+_handle_directory_control() in Jarwis.py dispatches natural-language intents
 to the appropriate method.
 
 Design rules
@@ -34,6 +34,7 @@ Design rules
 from __future__ import annotations
 
 import shutil
+import filecmp
 from pathlib import Path
 from typing import List, Optional
 
@@ -108,10 +109,27 @@ class DirectoryControl:
         directory does not exist or is not accessible.
         """
         validated = validate_workspace(path)
+        candidate_reader = DirectoryReader()
+        read_result = candidate_reader.read_directory(str(validated))
+        if not read_result.success:
+            raise WorkspaceNotFoundError(
+                read_result.error or f"Workspace is not readable: {validated}"
+            )
         self._active_directory = validated
-        # Load the reader so listing/inspection is immediately available
-        self._reader.read_directory(str(validated))
+        self._reader = candidate_reader
         return str(validated)
+
+    def _activate_directory(self, path: Path) -> str:
+        """Replace workspace and reader only after the candidate loads."""
+        candidate_reader = DirectoryReader()
+        read_result = candidate_reader.read_directory(str(path))
+        if not read_result.success:
+            raise WorkspaceNotFoundError(
+                read_result.error or f"Workspace is not readable: {path}"
+            )
+        self._active_directory = path
+        self._reader = candidate_reader
+        return str(path)
 
     def switch_directory(self, path: str) -> str:
         """
@@ -190,9 +208,7 @@ class DirectoryControl:
                 raise WorkspaceNotFoundError(
                     f"Navigation target is not a directory: {stripped}"
                 )
-            self._active_directory = resolved
-            self._reader.read_directory(str(resolved))
-            return str(resolved)
+            return self._activate_directory(resolved)
 
         # ---- Relative path / special tokens — require an active base ---
         current = self._require_workspace()
@@ -217,9 +233,7 @@ class DirectoryControl:
                 raise WorkspaceNotFoundError(
                     f"Parent path is not a directory: {resolved}"
                 )
-            self._active_directory = resolved
-            self._reader.read_directory(str(resolved))
-            return str(resolved)
+            return self._activate_directory(resolved)
 
         # ---- Multi-segment or bare relative path -----------------------
         # Resolve against the CURRENT active directory (not just the
@@ -234,9 +248,7 @@ class DirectoryControl:
             raise WorkspaceNotFoundError(
                 f"Navigation target is not a directory: {stripped}"
             )
-        self._active_directory = candidate
-        self._reader.read_directory(str(candidate))
-        return str(candidate)
+        return self._activate_directory(candidate)
 
     def clear_directory(self) -> Optional[str]:
         """
@@ -918,6 +930,7 @@ class DirectoryControl:
         if not src.exists():
             raise FileNotFoundInWorkspace(f"Source does not exist: {source}")
 
+        actual_dst = dst / src.name if dst.is_dir() else dst
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(dst))
@@ -925,12 +938,6 @@ class DirectoryControl:
             raise OperationError(f"Permission denied moving: {source}")
         except OSError as exc:
             raise OperationError(f"Move failed: {exc}")
-
-        # After move, dst may be a directory containing the source name
-        if dst.is_dir() and not dst.name == src.name:
-            actual_dst = dst / src.name
-        else:
-            actual_dst = dst
 
         self.verify_operation(actual_dst, must_exist=True)
         self.verify_operation(src, must_exist=False)
@@ -942,14 +949,14 @@ class DirectoryControl:
 
     def copy(self, source: str, destination: str) -> Path:
         """
-        Copy a file within the workspace.
+        Copy a file or directory within the workspace.
 
         Both source and destination must remain inside the active workspace.
 
         Parameters
         ----------
         source : str
-            Path to the file to copy.
+            Path to the file or directory to copy.
         destination : str
             Target path for the copy.
 
@@ -961,32 +968,87 @@ class DirectoryControl:
         Raises
         ------
         NoActiveWorkspaceError, WorkspaceViolationError,
-        FileNotFoundInWorkspace, NotAFileError, OperationError, VerificationError
+        FileNotFoundInWorkspace, OperationError, VerificationError
         """
         src = self._resolve(source)
         dst = self._resolve(destination)
 
         if not src.exists():
             raise FileNotFoundInWorkspace(f"Source does not exist: {source}")
-        if not src.is_file():
-            raise NotAFileError(f"Source is a directory, not a file: {source}")
-
+        is_directory = src.is_dir()
+        actual_dst = dst / src.name if dst.is_dir() else dst
+        if is_directory and (actual_dst == src or src in actual_dst.parents):
+            raise OperationError(
+                "Cannot copy a directory into itself or one of its descendants."
+            )
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(src), str(dst))
+            if is_directory:
+                shutil.copytree(str(src), str(actual_dst), symlinks=True)
+            else:
+                shutil.copy2(str(src), str(actual_dst))
         except PermissionError:
             raise OperationError(f"Permission denied copying: {source}")
+        except FileExistsError:
+            raise OperationError(f"Copy destination already exists: {destination}")
         except OSError as exc:
             raise OperationError(f"Copy failed: {exc}")
 
-        # If dst was an existing directory, the file was placed inside it
-        if dst.is_dir():
+        # If dst was an existing directory, the source was placed inside it.
+        if not is_directory and dst.is_dir():
             actual_dst = dst / src.name
-        else:
-            actual_dst = dst
 
         self.verify_operation(actual_dst, must_exist=True)
+        self._verify_copy(src, actual_dst)
         return actual_dst
+
+    @staticmethod
+    def _verify_copy(source: Path, destination: Path) -> None:
+        """Independently verify copied files, directory entries, and symlinks."""
+        if source.is_file():
+            if not destination.is_file() or not filecmp.cmp(
+                source, destination, shallow=False
+            ):
+                raise VerificationError(
+                    f"Copied file content did not match source: {destination}"
+                )
+            return
+
+        if not source.is_dir() or not destination.is_dir():
+            raise VerificationError(
+                f"Copied directory is missing or has the wrong type: {destination}"
+            )
+
+        source_entries = {item.relative_to(source) for item in source.rglob("*")}
+        destination_entries = {
+            item.relative_to(destination) for item in destination.rglob("*")
+        }
+        if source_entries != destination_entries:
+            raise VerificationError(
+                f"Copied directory entries did not match source: {destination}"
+            )
+
+        for relative_path in source_entries:
+            source_item = source / relative_path
+            destination_item = destination / relative_path
+            if source_item.is_symlink():
+                if (
+                    not destination_item.is_symlink()
+                    or source_item.readlink() != destination_item.readlink()
+                ):
+                    raise VerificationError(
+                        f"Copied symlink did not match source: {destination_item}"
+                    )
+            elif source_item.is_file() and not filecmp.cmp(
+                source_item, destination_item, shallow=False
+            ):
+                raise VerificationError(
+                    f"Copied file content did not match source: {destination_item}"
+                )
+            elif source_item.is_dir() and not destination_item.is_dir():
+                raise VerificationError(
+                    f"Copied directory entry did not match source: {destination_item}"
+                )
 
     # ------------------------------------------------------------------
     # Rename

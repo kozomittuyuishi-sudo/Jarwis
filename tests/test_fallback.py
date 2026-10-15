@@ -176,7 +176,7 @@ class TestSafeResponse(unittest.TestCase):
     """Verifies safe_response() strips the fallback sentinel correctly."""
 
     def setUp(self):
-        from Ag import safe_response, _BRAIN_FALLBACK_PREFIX, BRAIN_FALLBACK
+        from Jarwis import safe_response, _BRAIN_FALLBACK_PREFIX, BRAIN_FALLBACK
         self.safe_response = safe_response
         self.prefix = _BRAIN_FALLBACK_PREFIX
         self.generic = BRAIN_FALLBACK
@@ -317,7 +317,7 @@ class TestEndToEndSafeResponse(unittest.TestCase):
     """
 
     def setUp(self):
-        from Ag import safe_response, _BRAIN_FALLBACK_PREFIX
+        from Jarwis import safe_response, _BRAIN_FALLBACK_PREFIX
         self.safe_response = safe_response
         self.prefix = _BRAIN_FALLBACK_PREFIX
 

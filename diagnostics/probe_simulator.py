@@ -3,7 +3,7 @@ AG Probe Simulator — Phase A.
 
 Standalone risk/outcome simulator for actions before AG executes them.
 Deterministic rules only, no LLM calls, no external dependencies.
-Not wired into Ag.py yet — this module can be called and tested on its own.
+Not wired into Jarwis.py yet — this module can be called and tested on its own.
 
 Expects action dicts shaped like conversation_manager.py's action schema:
 {

@@ -6,7 +6,7 @@ Adaptive Cloud Brain — Part A
 Intelligent middleware that prepares every cloud request before it
 reaches any provider.  This package is a standalone subsystem.
 
-It does NOT integrate with Ag.py and does NOT modify runtime behaviour.
+It does NOT integrate with Jarwis.py and does NOT modify runtime behaviour.
 
 Public API
 ----------

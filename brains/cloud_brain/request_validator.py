@@ -275,8 +275,21 @@ class RequestValidator:
         """Check that the prompt fits within the provider's context window."""
         prompt_tokens = estimation.estimated_prompt_tokens
         context_window = profile.context_window
+        request_tokens = prompt_tokens + estimation.max_tokens
 
         usage_fraction = prompt_tokens / context_window if context_window > 0 else 1.0
+
+        if request_tokens > context_window:
+            issues.append(ValidationIssue(
+                check="request_size",
+                severity=Severity.ERROR,
+                message=(
+                    f"Estimated prompt ({prompt_tokens} tokens) plus output "
+                    f"allowance ({estimation.max_tokens} tokens) exceeds the "
+                    f"context window ({context_window} tokens)."
+                ),
+                detail=f"Estimated total: {request_tokens} tokens",
+            ))
 
         if usage_fraction >= self._config.prompt_size_error_fraction:
             issues.append(ValidationIssue(

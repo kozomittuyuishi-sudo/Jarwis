@@ -149,6 +149,14 @@ _CAPABILITY_SIGNALS: List[tuple] = [
     ("event",                "Analytics event logging"),
     ("file",                 "Memory file viewer"),
     ("open memory",          "Memory file viewer"),
+    ("implement",            "Workspace and filesystem control"),
+    ("implementation",       "Workspace and filesystem control"),
+    ("edit code",            "Workspace and filesystem control"),
+    ("modify code",          "Workspace and filesystem control"),
+    ("change existing behavior", "Workspace and filesystem control"),
+    ("code",                 "Workspace and filesystem control"),
+    ("edit",                 "Workspace and filesystem control"),
+    ("modify",               "Workspace and filesystem control"),
 ]
 
 _LIMITATION_SIGNALS: List[tuple] = [
@@ -260,17 +268,29 @@ def assess_task(task_description: str) -> TaskAssessment:
 
     elif blocking_lim_records and matched_cap_records:
         verdict = VERDICT_PARTIAL
-        notes.append("AB has some relevant capabilities, but one or more blockers prevent full completion.")
+        notes.append("Jarwis has some relevant capabilities, but one or more blockers prevent full completion.")
 
     elif matched_cap_records:
         verdict = VERDICT_FEASIBLE
-        notes.append("AB has verified capabilities that cover this task.")
+        notes.append("Jarwis has verified capabilities that cover this task.")
+        if any(
+            signal in norm
+            for signal in (
+                "implement", "implementation", "edit code", "modify code",
+                "change existing behavior", "code", "edit", "modify",
+            )
+        ):
+            notes.append(
+                "File changes are limited to an accessible workspace and the "
+                "existing filesystem controls; this is not unrestricted "
+                "self-modification."
+            )
 
     else:
         # No signals matched — we don't know
         verdict = VERDICT_NEEDS_MORE
         notes.append(
-            "This task does not map to any known AB capability or limitation. "
+            "This task does not map to any known Jarwis capability or limitation. "
             "It may require capabilities that have not yet been built."
         )
 

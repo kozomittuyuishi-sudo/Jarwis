@@ -361,11 +361,10 @@ class RetryManager:
                 reason="Malformed response — structural failure; retry unlikely to help.",
             )
 
-        # Empty response or truncated content → increase or reset budget
+        # Empty response or invalid content can receive a bounded retry.
         if failed_axes & self._BUDGET_AXES:
-            # On response failure, budget reduction may seem counterintuitive,
-            # but a very large budget often triggers credit exhaustion (402).
-            # We use the reduction factor here too — the caller may override.
+            # This is not a billing recovery path; HTTP 402 is handled before
+            # response validation and must never be retried here.
             adjusted_tokens = self._reduce_tokens(current_max_tokens)
             adjustments.append(
                 f"Adjusted max_tokens for retry: {current_max_tokens} → {adjusted_tokens}."

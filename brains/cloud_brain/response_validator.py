@@ -25,11 +25,34 @@ Design principles
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+_INTERNAL_PLANNING_PATTERNS = (
+    re.compile(
+        r"\b(?:let me|i(?:'ll| will)|we need to)\s+(?:now\s+)?"
+        r"(?:craft|compose|draft)\s+(?:a\s+)?(?:response|reply|answer)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bappropriately\s*:\s*(?:acknowledge|explain|answer|respond|"
+        r"clarify|summarize)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:analysis|internal reasoning|chain of thought)\s*[:\-]",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(r"<\s*think(?:ing)?\s*>", re.IGNORECASE),
+)
+
+
+def _contains_internal_planning(text: str) -> bool:
+    return any(pattern.search(text) for pattern in _INTERNAL_PLANNING_PATTERNS)
 
 
 # ---------------------------------------------------------------------------
@@ -129,12 +152,9 @@ class ResponseValidatorConfig:
         Maximum characters before issuing a length warning (0 = no limit).
     """
     accepted_finish_reasons: List[str] = field(default_factory=lambda: [
-        "stop", "end_turn", "length", "tool_calls", "function_call",
-        "content_filter", "max_tokens",
+        "stop", "end_turn", "tool_calls", "function_call", "content_filter",
     ])
-    warn_finish_reasons: List[str] = field(default_factory=lambda: [
-        "length", "max_tokens",
-    ])
+    warn_finish_reasons: List[str] = field(default_factory=list)
     min_content_length: int = 1
     max_content_length: int = 0      # 0 = no maximum enforced
 
@@ -516,6 +536,12 @@ class ResponseValidator:
                         f"({len(stripped)} chars, min={self._config.min_content_length})."
                     ),
                 )
+            if _contains_internal_planning(stripped):
+                return AxisResult(
+                    axis=ValidationAxis.MESSAGE_CONTENT,
+                    passed=False,
+                    message="Message contains internal response-planning text.",
+                )
             if self._config.max_content_length > 0 and len(stripped) > self._config.max_content_length:
                 return AxisResult(
                     axis=ValidationAxis.MESSAGE_CONTENT,
@@ -539,10 +565,38 @@ class ResponseValidator:
                     passed=False,
                     message="Message content is an empty list.",
                 )
+            text_count = 0
+            for index, part in enumerate(content):
+                if not isinstance(part, dict):
+                    return AxisResult(
+                        axis=ValidationAxis.MESSAGE_CONTENT,
+                        passed=False,
+                        message=f"Content block {index} is not an object.",
+                    )
+                if part.get("type") not in {"text", "output_text"}:
+                    return AxisResult(
+                        axis=ValidationAxis.MESSAGE_CONTENT,
+                        passed=False,
+                        message=f"Unsupported content block type at index {index}.",
+                    )
+                text = part.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    return AxisResult(
+                        axis=ValidationAxis.MESSAGE_CONTENT,
+                        passed=False,
+                        message=f"Content block {index} has no usable text.",
+                    )
+                if _contains_internal_planning(text):
+                    return AxisResult(
+                        axis=ValidationAxis.MESSAGE_CONTENT,
+                        passed=False,
+                        message="Message contains internal response-planning text.",
+                    )
+                text_count += 1
             return AxisResult(
                 axis=ValidationAxis.MESSAGE_CONTENT,
-                passed=True,
-                message=f"Multimodal content: {len(content)} part(s).",
+                passed=text_count > 0,
+                message=f"Text content: {text_count} block(s).",
             )
 
         return AxisResult(

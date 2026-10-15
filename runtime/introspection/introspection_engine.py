@@ -17,7 +17,7 @@ Responsibilities
 Rules
 -----
 - NOT connected to Cloud Brain.
-- NOT connected to Ag.py.
+- NOT connected to Jarwis.py.
 - NOT exposed through chat.
 - Stdlib only. No I/O. No LLM calls.
 """

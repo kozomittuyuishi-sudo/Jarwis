@@ -27,7 +27,7 @@ THE CORE PRINCIPLE
     LLM:            "Here is what I think the user means."
     Preprocessor:   "Here is the structured operation I recognize."
     Local subsystem:"Here is what actually happened."
-    AG:             "Here is the human-readable response."
+    Jarwis:             "Here is the human-readable response."
 
 The Preprocessor Brain is the middle two steps. It NEVER lets an LLM
 perform or claim to perform a filesystem action, and it NEVER guesses
@@ -110,6 +110,7 @@ class Domain:
 class Intent:
     """Structured intents (Feature 3)."""
     # --- Self-info intents ---
+    GET_IDENTITY = "GET_IDENTITY"
     GET_CAPABILITIES = "GET_CAPABILITIES"
     GET_LIMITATIONS = "GET_LIMITATIONS"
     GET_ARCHITECTURE = "GET_ARCHITECTURE"
@@ -635,7 +636,7 @@ DEFAULT_BRAIN_INFO: Dict[str, Any] = {
 
 DEFAULT_ARCHITECTURE_INFO: str = (
     "AG has two evolutionary execution paths: (1) the primary live path — "
-    "Ag.py -> intent routing -> brain -> response, and (2) the formal "
+    "Jarwis.py -> intent routing -> brain -> response, and (2) the formal "
     "pipeline — ag_pipeline.py -> CognitiveEngine -> BrainDispatcher -> "
     "ResponseProcessor -> ExecutiveLayer. The Preprocessor Brain is a "
     "deterministic offline processing layer that sits in front of both "
@@ -648,12 +649,18 @@ class SelfInfoProcessor:
     """Answers self-info questions using ONLY verified data (Feature 1)."""
 
     _INTENT_PATTERNS: List[Tuple[re.Pattern, str]] = [
-        (re.compile(r"\blimitation"), Intent.GET_LIMITATIONS),
+        (re.compile(r"\b(?:limitation\w*|don't.*support|do not.*support|unsupported)\b"), Intent.GET_LIMITATIONS),
         (re.compile(r"\barchitecture\b|\bhow (?:are|is) you (?:built|structured|designed)\b|"
-                     r"\bpipeline\b|\bhow do you work\b"), Intent.GET_ARCHITECTURE),
-        (re.compile(r"\bbrain\b"), Intent.GET_BRAIN_INFO),
-        (re.compile(r"\bcapabilit|\bwhat can you do\b|\bare you able to\b|\bcan you\b"),
+                     r"\bpipeline\b|\bhow (?:do )?you work\b|\bwhat happens internally\b|"
+                     r"\bwhat systems do you have\b"), Intent.GET_ARCHITECTURE),
+        (re.compile(r"\bbrains?\b"), Intent.GET_BRAIN_INFO),
+        (re.compile(r"\bcapabilit|\bcapable of\b|\bwhat can you (?:currently )?do\b|"
+                    r"\bwhat you can do\b|\bwhat functionality do you have\b|"
+                    r"\bwhat functions? (?:do you have|do you support)\b|"
+                    r"\bwhat can you help me with\b|\bare you able to\b|\bcan you\b"),
          Intent.GET_CAPABILITIES),
+        (re.compile(r"\bwho you are\b|\babout yourself\b|\bknow about yourself\b|\byour identity\b"),
+         Intent.GET_IDENTITY),
     ]
 
     def __init__(self, capability_registry: CapabilityRegistry,
@@ -673,6 +680,10 @@ class SelfInfoProcessor:
                                     "defaulting to capabilities overview.")
 
     def answer(self, intent: str) -> str:
+        if intent == Intent.GET_IDENTITY:
+            from self_info import SelfInfoEngine
+
+            return SelfInfoEngine().answer("who are you").context_block
         if intent == Intent.GET_LIMITATIONS:
             return self.capabilities.describe_limitations()
         if intent == Intent.GET_ARCHITECTURE:
@@ -698,14 +709,19 @@ class RequestClassifier:
     """
 
     _SELF_INFO_PATTERNS: List[re.Pattern] = [re.compile(p, re.IGNORECASE) for p in [
+        r"\bwho you are\b|\btell me about yourself\b|\bknow about yourself\b|\byour identity\b",
         r"\bwhat are your capabilit",
-        r"\bwhat can you do\b",
+        r"\bwhat can you (?:currently )?do\b|\bwhat you can do\b",
+        r"\bwhat functionality do you have\b|\bwhat functions? (?:do you have|do you support)\b",
+        r"\bwhat can you help me with\b",
         r"\bcan you (?:read|create|write|edit|delete|remove|handle|automate|manage|switch)\b",
         r"\byour (?:capabilities|limitations|architecture)\b",
-        r"\bwhat are you (?:capable|able) of\b",
+        r"\bwhat (?:are you|you're|you are) (?:capable|able) of\b",
+        r"\bwhat operations? .*?(?:don't|do not).*support\b",
+        r"\b(?:how you work(?: internally)?|what happens internally|what systems do you have)\b",
         r"\bwhat is your architecture\b",
         r"\bhow (?:are|is) you (?:built|structured|designed)\b",
-        r"\bwhich brain\b",
+        r"\b(?:which|what) brains?\b|\bhow many brains\b",
         r"\btell me about yourself\b",
         r"\bwhat are your limitations\b",
         r"\bdo you support\b",
@@ -717,6 +733,7 @@ class RequestClassifier:
     _DIRECTORY_PATTERNS: List[re.Pattern] = [re.compile(p, re.IGNORECASE) for p in [
         r"^\s*(?:list|show)\b",
         r"\b(?:current|active)\s+(?:directory|workspace)\b",
+        r"\bwhat (?:directory|folder)\b.*\b(?:am i in|are we in)\b|"
         r"\bwhat directory\b|\bwhat workspace\b|\bworking in\b|\bwhere am i\b|\bwhere are you\b",
         r"\bset\s+(?:the\s+)?workspace\s+to\b|\bswitch\s+workspace(?:s)?\s+to\b|\bswitch to\b|"
         r"\bchange (?:the )?(?:directory|workspace) to\b|^\s*cd\s|\bwork\s+in\b|"
@@ -846,8 +863,8 @@ class IntentDetector:
         #    read as queries, not commands.
         (re.compile(r"\b(?:current|active)\s+(?:directory|workspace)\b", re.IGNORECASE),
          Intent.CURRENT_DIRECTORY),
-        (re.compile(r"\bwhere am i\b|\bwhere are you\b|\bwhat directory\b|\bwhat workspace\b|"
-                     r"\bworking in\b", re.IGNORECASE),
+        (re.compile(r"\bwhere am i\b|\bwhere are you\b|\bwhat (?:directory|folder)\b.*\b(?:am i in|are we in)\b|"
+                     r"\bwhat directory\b|\bwhat workspace\b|\bworking in\b", re.IGNORECASE),
          Intent.CURRENT_DIRECTORY),
 
         # 3. Switch/set workspace — imperative phrasing. "work in" and
@@ -2057,6 +2074,43 @@ class PreprocessorBrain:
                 requires_llm=True,
                 metadata={"internal_message": str(exc)},
             )
+
+    def process_self_info_intent(
+        self,
+        subtype: str,
+        original_text: str = "",
+    ) -> PreprocessorResult:
+        """Answer a QUIPS-owned self-info subtype without reclassifying its wording."""
+        intent_by_subtype = {
+            "IDENTITY": Intent.GET_IDENTITY,
+            "CAPABILITIES": Intent.GET_CAPABILITIES,
+            "LIMITATIONS": Intent.GET_LIMITATIONS,
+            "ARCHITECTURE": Intent.GET_ARCHITECTURE,
+            "OPERATIONAL": Intent.GET_BRAIN_INFO,
+            "BRAINS": Intent.GET_BRAIN_INFO,
+        }
+        intent = intent_by_subtype.get(str(subtype).upper())
+        if intent is None:
+            return PreprocessorResult(
+                success=False,
+                domain=Domain.SELF_INFO,
+                intent=Intent.UNKNOWN,
+                error=f"Unsupported self-info subtype: {subtype}",
+                error_domain=ErrorDomain.SELF_INFO,
+                requires_llm=False,
+                metadata={"source": "QUIPS"},
+            )
+        return PreprocessorResult(
+            success=True,
+            domain=Domain.SELF_INFO,
+            intent=intent,
+            operation=intent,
+            target=None,
+            result=self.self_info.answer(intent),
+            confidence=1.0,
+            requires_llm=False,
+            metadata={"source": "QUIPS", "request": str(original_text)},
+        )
 
     # ------------------------------------------------------------------
     # Internal

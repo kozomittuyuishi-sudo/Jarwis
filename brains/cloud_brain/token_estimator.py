@@ -40,13 +40,13 @@ class RequestCategory(str, Enum):
     Coarse classification of the expected response size.
     The string value is used in logs and serialisation.
     """
-    GREETING         = "greeting"           # ≤ 128 tokens
-    SHORT_FACTUAL    = "short_factual"      # ≤ 256 tokens
-    CONVERSATIONAL   = "conversational"     # ≤ 512 tokens
-    REASONING        = "reasoning"          # ≤ 1 024 tokens
-    LONG_EXPLANATION = "long_explanation"   # ≤ 2 048 tokens
-    LARGE_REPORT     = "large_report"       # ≤ 4 096 tokens
-    VERY_LARGE       = "very_large"         # ≤ 8 192 tokens
+    GREETING         = "greeting"           # ≤ 128 output tokens
+    SHORT_FACTUAL    = "short_factual"      # ≤ 256 output tokens
+    CONVERSATIONAL   = "conversational"     # ≤ 384 output tokens
+    REASONING        = "reasoning"          # ≤ 1 024 output tokens
+    LONG_EXPLANATION = "long_explanation"  # ≤ 1 536 output tokens
+    LARGE_REPORT     = "large_report"       # ≤ 2 048 output tokens
+    VERY_LARGE       = "very_large"         # ≤ 2 048 output tokens
 
 
 # ---------------------------------------------------------------------------
@@ -75,14 +75,15 @@ class EstimatorConfig:
         default_factory=lambda: {
             RequestCategory.GREETING:         128,
             RequestCategory.SHORT_FACTUAL:    256,
-            RequestCategory.CONVERSATIONAL:   512,
+            RequestCategory.CONVERSATIONAL:   384,
             RequestCategory.REASONING:       1024,
-            RequestCategory.LONG_EXPLANATION:2048,
-            RequestCategory.LARGE_REPORT:    4096,
-            RequestCategory.VERY_LARGE:      8192,
+            RequestCategory.LONG_EXPLANATION:1536,
+            RequestCategory.LARGE_REPORT:    2048,
+            RequestCategory.VERY_LARGE:      2048,
         }
     )
-    provider_safety_cap: int = 4096
+    provider_safety_cap: int = 2048
+    context_safety_reserve: int = 128
     fallback_budget: int     = 512
     safe_default: int        = 512
     chars_per_token: float   = 4.0
@@ -96,6 +97,11 @@ class EstimatorConfig:
             raise ValueError(f"safe_default must be > 0, got {self.safe_default}")
         if self.chars_per_token <= 0:
             raise ValueError(f"chars_per_token must be > 0, got {self.chars_per_token}")
+        if self.context_safety_reserve < 0:
+            raise ValueError(
+                "context_safety_reserve must be >= 0, "
+                f"got {self.context_safety_reserve}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +159,8 @@ class TokenEstimator:
     1. Compute estimated prompt token count from character length.
     2. Detect reasoning complexity via structural signals.
     3. Resolve category (caller-supplied → keyword detection → length heuristic).
-    4. Look up budget from config and clamp to the provider ceiling.
+    4. Look up budget from config and clamp to provider output and remaining
+       context-window limits.
     5. Return EstimationResult with full reasoning trace.
 
     Usage
@@ -201,6 +208,7 @@ class TokenEstimator:
         "why", "how does", "explain", "analyse", "analyze", "compare",
         "difference between", "pros and cons", "advantages", "disadvantages",
         "design", "architecture", "implement", "algorithm", "reason",
+        "brainstorm",
         "evaluate", "assess", "critique", "review", "trace", "debug",
         "refactor", "optimize", "optimise",
     })
@@ -230,6 +238,8 @@ class TokenEstimator:
         category: Optional[str] = None,
         intent: Optional[str] = None,
         provider_max_output: Optional[int] = None,
+        provider_context_window: Optional[int] = None,
+        task_text: Optional[str] = None,
     ) -> EstimationResult:
         """
         Estimate the max_tokens budget for a cloud request.
@@ -247,6 +257,11 @@ class TokenEstimator:
         provider_max_output : int, optional
             The provider's max_output_tokens.  Acts as the hard ceiling.
             Falls back to config.provider_safety_cap when not supplied.
+        provider_context_window : int, optional
+            Total prompt-plus-output context window reported by the provider.
+        task_text : str, optional
+            User request text for category detection, kept separate from
+            system instructions and conversation context in ``prompt``.
 
         Returns
         -------
@@ -254,6 +269,11 @@ class TokenEstimator:
         """
         reasoning: List[str] = []
         text = str(prompt).strip()
+        classification_text = str(task_text).strip() if task_text is not None else text
+        classification_tokens = max(
+            1,
+            int(len(classification_text) / self._config.chars_per_token),
+        )
 
         # Step 1 — Prompt token estimate
         estimated_prompt_tokens = max(1, int(len(text) / self._config.chars_per_token))
@@ -263,12 +283,12 @@ class TokenEstimator:
         )
 
         # Step 2 — Complexity score
-        complexity = self._compute_complexity(text, reasoning)
+        complexity = self._compute_complexity(classification_text, reasoning)
 
         # Step 3 — Resolve category
         resolved_category = self._resolve_category(
-            text=text,
-            estimated_prompt_tokens=estimated_prompt_tokens,
+            text=classification_text,
+            estimated_prompt_tokens=classification_tokens,
             category=category,
             intent=intent,
             complexity=complexity,
@@ -289,8 +309,28 @@ class TokenEstimator:
             )
             raw_budget = uplifted
 
-        # Step 6 — Apply provider ceiling
-        ceiling = provider_max_output if provider_max_output and provider_max_output > 0 else self._config.provider_safety_cap
+        # Output allowance is distinct from estimated input size. Reserve
+        # context space for both the complete prompt and provider output.
+        output_ceiling = (
+            provider_max_output
+            if provider_max_output and provider_max_output > 0
+            else self._config.provider_safety_cap
+        )
+        ceiling = min(output_ceiling, self._config.provider_safety_cap)
+        if provider_context_window and provider_context_window > 0:
+            context_headroom = max(
+                1,
+                provider_context_window
+                - estimated_prompt_tokens
+                - self._config.context_safety_reserve,
+            )
+            ceiling = min(ceiling, context_headroom)
+            reasoning.append(
+                f"Context window {provider_context_window} minus estimated prompt "
+                f"{estimated_prompt_tokens} and reserve "
+                f"{self._config.context_safety_reserve} leaves {context_headroom} "
+                "output tokens."
+            )
         max_tokens = min(raw_budget, ceiling)
         reasoning.append(
             f"Category '{resolved_category.value}' → budget {raw_budget} tokens; "

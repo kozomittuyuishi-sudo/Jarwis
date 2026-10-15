@@ -1,11 +1,12 @@
 """
 self_info/ab_self_model.py
 ===========================
-AB Self-Model — Structured Factual Data
+Jarwis Self-Model — Structured Factual Data
 
-Provides verified, structured information about AB (Ambient Guidance)
-covering identity, architecture, capabilities, limitations, and
-operational state.
+Provides verified, structured information about Jarwis, the assistant identity
+implemented by the AG project.
+covering identity, architecture, capabilities, limitations, and operational
+state.
 
 Design rules:
 - No long natural-language strings stored here.
@@ -47,22 +48,29 @@ def _load_json(path: str) -> Dict[str, Any]:
 
 def get_identity() -> Dict[str, Any]:
     """
-    Return AB's verified identity facts.
+    Return Jarwis's verified identity facts.
 
     Sources:
     - configuration/project_context.json  (project metadata)
     - Hardcoded structural facts that don't change run-to-run.
     """
     ctx = _load_json(_PROJECT_CONTEXT_PATH)
-    return {
-        "name":          ctx.get("project_name", "AG"),
-        "full_name":     ctx.get("full_name", "Ambient Guidance"),
+    from runtime.persona_controller import get_persona_controller
+
+    identity = {
+        "name":          "Jarwis",
+        "short_name":    "J",
+        "full_name":     "Jarwis AI Assistant",
         "version":       ctx.get("current_version", "UNKNOWN"),
         "phase":         ctx.get("current_phase", "UNKNOWN"),
         "purpose":       "A personal AI assistant that provides intelligent responses, memory management, task tracking, and project awareness through a terminal interface.",
         "project_type":  "Python terminal-based AI assistant",
-        "creator_note":  "Built as Project AB — iterative development, single-user.",
+        "active_persona": get_persona_controller().mode.title(),
     }
+    creator = ctx.get("creator") or ctx.get("creator_name")
+    if isinstance(creator, str) and creator.strip():
+        identity["creator"] = creator.strip()
+    return identity
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +80,7 @@ def get_identity() -> Dict[str, Any]:
 # Static architecture description — these are verified from the codebase.
 ARCHITECTURE: Dict[str, Any] = {
     "major_modules": {
-        "Ag.py": "Main entry point. Owns the REPL, intent routing, and pipeline orchestration.",
+        "Jarwis.py": "Main entry point. Owns the REPL, intent routing, and pipeline orchestration.",
         "cognition/": "ExecutiveLayer (storage/routing decisions), CognitiveEngine (turn processing), executive.py (plan building).",
         "conversation/": "ConversationManager, EntityTracker, ReferenceResolver, ResponseProcessor.",
         "memory/": "WorkingMemory (ephemeral session state), clean_memory utility.",
@@ -86,7 +94,7 @@ ARCHITECTURE: Dict[str, Any] = {
         "self_info/": "Self-Info system — structured self-model, query routing, task assessment.",
     },
     "runtime_flow": [
-        "User types input → Ag.py main() loop",
+        "User types input → Jarwis.py main() loop",
         "detect_intent() classifies the intent",
         "Self-info queries → SelfInfoEngine (self_info/)",
         "Introspection queries → IntrospectionEngine + _handle_introspection()",
@@ -206,6 +214,25 @@ CAPABILITIES: List[Dict[str, Any]] = [
         "requires_external": False,
     },
     {
+        "name": "Workspace and filesystem control",
+        "description": (
+            "Set, switch, navigate, and clear an active workspace; inspect, list, "
+            "read, create, write, append, rename, copy, move, and search files; "
+            "copy directories within workspace boundaries."
+        ),
+        "implemented": True,
+        "requires_external": False,
+    },
+    {
+        "name": "Directory content reading",
+        "description": (
+            "Index readable text files in a selected directory and answer questions "
+            "using relevant file contents."
+        ),
+        "implemented": True,
+        "requires_external": False,
+    },
+    {
         "name": "Analytics event logging",
         "description": "Log events to data/warehouse/events.jsonl for later analysis.",
         "implemented": True,
@@ -278,7 +305,7 @@ LIMITATIONS: List[Dict[str, Any]] = [
     },
     {
         "name": "Working memory method gaps",
-        "description": "Several WorkingMemory methods referenced in Ag.py are noted as migration placeholders (discussion_topic, get_discussion_entries, has_unsaved_discussion, resolve_thread_reference, update_working_memory).",
+        "description": "Several WorkingMemory methods referenced in Jarwis.py are noted as migration placeholders (discussion_topic, get_discussion_entries, has_unsaved_discussion, resolve_thread_reference, update_working_memory).",
         "category": "incomplete_system",
         "blocked_by": "migration_pending",
     },
@@ -351,6 +378,8 @@ def get_operational_info() -> Dict[str, Any]:
             "capabilities":     brain.get("capabilities", []),
         })
 
+    from runtime.persona_controller import get_persona_controller
+
     return {
         "brains":           brains,
         "current_version":  ctx.get("current_version", "UNKNOWN"),
@@ -359,4 +388,8 @@ def get_operational_info() -> Dict[str, Any]:
         "next_milestone":   ctx.get("next_milestone", "UNKNOWN"),
         "blocked_features": ctx.get("blocked_features", []),
         "completed_milestones": ctx.get("completed_milestones", []),
+        "active_persona": get_persona_controller().mode.title(),
+        "brain_mode": _load_json(
+            os.path.join(_ROOT, "configuration", "brain_config.json")
+        ).get("brain_mode", "UNKNOWN"),
     }

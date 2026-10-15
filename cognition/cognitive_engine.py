@@ -69,6 +69,7 @@ class CognitiveEngine:
             "pending_action": deepcopy(context_snapshot.get("pending_action")),
             "pending_questions": deepcopy(context_snapshot.get("pending_questions", [])),
             "conversation_reference": deepcopy(context_snapshot.get("conversation_reference", {})),
+            "action_events": deepcopy(context_snapshot.get("action_events", [])),
             "ingested_at": datetime.now(timezone.utc).isoformat()
         }
 
@@ -209,6 +210,17 @@ class CognitiveEngine:
             "active_task": cog_state.get("task"),
             "active_topic": cog_state.get("topic"),
             "relevant_facts": cog_state.get("facts"),
+            "recent_actions": [
+                {
+                    key: event.get(key)
+                    for key in (
+                        "action_id", "action", "intended_action", "request_unit_text",
+                        "resolved_path", "target_type", "status", "verification_status",
+                        "failure_stage", "error", "dependencies",
+                    )
+                }
+                for event in cog_state.get("action_events", [])[-8:]
+            ],
             "evaluated_scratchpad": [item["note"] for item in ranked_scratchpad if item["priority"] == "high"]
         }
 

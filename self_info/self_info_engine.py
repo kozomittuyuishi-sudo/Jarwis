@@ -179,13 +179,17 @@ class SelfInfoEngine:
     def _handle_identity(self, route: QueryRoute, snapshot: Optional[Any]) -> SelfInfoResult:
         identity = get_identity()
         lines = [
-            "IDENTITY (verified from project_context.json):",
+            "IDENTITY (assistant identity; project metadata from project_context.json):",
             f"  Name:     {identity['name']} ({identity['full_name']})",
+            f"  Short name: {identity['short_name']}",
+            f"  Active persona: {identity['active_persona']}",
             f"  Version:  {identity['version']}",
             f"  Phase:    {identity['phase']}",
             f"  Purpose:  {identity['purpose']}",
             f"  Type:     {identity['project_type']}",
         ]
+        if identity.get("creator"):
+            lines.append(f"  Creator:  {identity['creator']}")
         if snapshot:
             lines.append(f"  Runtime identity: {snapshot.identity_name} v{snapshot.identity_version}")
         return SelfInfoResult(
@@ -286,6 +290,8 @@ class SelfInfoEngine:
         lines.append(f"  Phase:     {ops['current_phase']}")
         lines.append(f"  Objective: {ops['current_objective']}")
         lines.append(f"  Next milestone: {ops['next_milestone']}")
+        lines.append(f"  Active persona: {ops['active_persona']}")
+        lines.append(f"  Configured brain mode: {ops['brain_mode']}")
 
         if ops["brains"]:
             lines.append("\nAvailable Brains:")
@@ -322,7 +328,7 @@ class SelfInfoEngine:
 
         # Build context block with assessment facts + relevant self-model data
         lines = [
-            "TASK ASSESSMENT (based on verified AB capabilities):",
+            "TASK ASSESSMENT (based on verified Jarwis capabilities):",
             assessment.to_text(),
         ]
 
@@ -346,12 +352,15 @@ class SelfInfoEngine:
         impl     = get_implemented_capabilities()
 
         lines = [
-            f"AB OVERVIEW:",
+            f"JARWIS OVERVIEW:",
             f"  {identity['name']} ({identity['full_name']}) — Version {identity['version']}",
+            f"  Active persona: {identity['active_persona']}",
             f"  Phase: {identity['phase']}",
             f"  Purpose: {identity['purpose']}",
-            f"\nImplemented capabilities ({len(impl)}):",
         ]
+        if identity.get("creator"):
+            lines.append(f"  Creator: {identity['creator']}")
+        lines.append(f"\nImplemented capabilities ({len(impl)}):")
         for cap_name in impl:
             lines.append(f"  • {cap_name}")
 

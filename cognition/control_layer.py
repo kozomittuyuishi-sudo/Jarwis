@@ -18,7 +18,7 @@ This layer is purely advisory:
     read/written by brain.py, is untouched by this file entirely)
   - never prompts a user for input
 
-Not wired into Ag.py yet (Phase A scope, per architecture rules).
+Not wired into Jarwis.py yet (Phase A scope, per architecture rules).
 
 Python standard library only. Deterministic. No LLM calls.
 """

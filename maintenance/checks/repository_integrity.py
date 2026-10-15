@@ -27,7 +27,7 @@ REQUIRED_PACKAGES = [
 ]
 
 # Files that belong only at root level
-ROOT_ONLY_FILES = ["Ag.py"]
+ROOT_ONLY_FILES = ["Jarwis.py"]
 
 # Directories that should not contain .py files
 NON_PYTHON_DIRS = [
@@ -110,7 +110,7 @@ def run(project_root: str) -> dict:
 
     for filepath in python_files:
         stem = filepath.stem
-        if stem.startswith("__") or stem == "Ag":
+        if stem.startswith("__") or stem == "Jarwis":
             continue
         # Check if the module name appears in any import statement
         pkg_path = filepath.relative_to(root)

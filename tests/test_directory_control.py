@@ -120,6 +120,31 @@ class TestSetDirectory:
             ctrl.set_directory(d2)
             assert Path(ctrl.get_active_directory()).resolve() == Path(d2).resolve()
 
+    def test_failed_indexing_preserves_previous_workspace_and_reader(
+        self, tmp_ws, monkeypatch
+    ):
+        import directory_control.directory_control as directory_module
+
+        ctrl = DirectoryControl()
+        ctrl.set_directory(str(tmp_ws))
+        previous_reader = ctrl._reader
+
+        class FailedReader:
+            directory = None
+
+            def read_directory(self, _path):
+                return type("ReadResult", (), {
+                    "success": False,
+                    "error": "indexing failed",
+                })()
+
+        monkeypatch.setattr(directory_module, "DirectoryReader", FailedReader)
+        with pytest.raises(WorkspaceNotFoundError, match="indexing failed"):
+            ctrl.set_directory(str(tmp_ws))
+
+        assert Path(ctrl.get_active_directory()).resolve() == tmp_ws.resolve()
+        assert ctrl._reader is previous_reader
+
 
 # ===========================================================================
 # 2. switch_directory
@@ -578,6 +603,19 @@ class TestMove:
         dc.move("src.txt", "dst.txt")
         assert not (tmp_ws / "src.txt").exists()
 
+    def test_move_directory_to_new_name_verifies_actual_destination(self, dc, tmp_ws):
+        source = tmp_ws / "source-dir"
+        source.mkdir()
+        _write(source, "nested/data.txt", "directory move")
+
+        result = dc.move("source-dir", "moved-dir")
+
+        assert result == tmp_ws / "moved-dir"
+        assert (result / "nested" / "data.txt").read_text(
+            encoding="utf-8"
+        ) == "directory move"
+        assert not source.exists()
+
 
 # ===========================================================================
 # 13. copy
@@ -606,10 +644,40 @@ class TestCopy:
         with pytest.raises(FileNotFoundInWorkspace):
             dc.copy("ghost.txt", "copy.txt")
 
-    def test_copy_directory_source_raises(self, dc, tmp_ws):
-        (tmp_ws / "adir").mkdir()
-        with pytest.raises(NotAFileError):
-            dc.copy("adir", "adir_copy")
+    def test_copy_directory_tree_is_verified(self, dc, tmp_ws):
+        source = tmp_ws / "adir"
+        source.mkdir()
+        _write(source, "nested/data.txt", "verified directory copy")
+
+        result = dc.copy("adir", "adir_copy")
+
+        assert result == tmp_ws / "adir_copy"
+        assert (result / "nested" / "data.txt").read_text(
+            encoding="utf-8"
+        ) == "verified directory copy"
+        assert (source / "nested" / "data.txt").exists()
+
+    def test_copy_directory_into_descendant_is_rejected_without_side_effects(
+        self, dc, tmp_ws
+    ):
+        source = tmp_ws / "adir"
+        source.mkdir()
+        _write(source, "data.txt", "original")
+
+        with pytest.raises(OperationError, match="itself or one of its descendants"):
+            dc.copy("adir", "adir/new/nested-copy")
+
+        assert not (source / "new").exists()
+        assert (source / "data.txt").read_text(encoding="utf-8") == "original"
+
+    def test_copy_file_into_existing_directory(self, dc, tmp_ws):
+        _write(tmp_ws, "original.txt", "copy into directory")
+        (tmp_ws / "dest").mkdir()
+
+        result = dc.copy("original.txt", "dest")
+
+        assert result == tmp_ws / "dest" / "original.txt"
+        assert result.read_text(encoding="utf-8") == "copy into directory"
 
     def test_copy_source_traversal_rejected(self, dc):
         with pytest.raises((WorkspaceViolationError, PermissionError)):

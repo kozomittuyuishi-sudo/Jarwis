@@ -240,6 +240,8 @@ class AdaptiveCloudBrain:
         category: Optional[str] = None,
         intent: Optional[str] = None,
         required_features: Optional[Set[str]] = None,
+        task_text: Optional[str] = None,
+        prepared_request: Optional[PrepResult] = None,
         attempt_number: int = 1,
         latency_ms: Optional[float] = None,
     ) -> BrainResult:
@@ -261,6 +263,11 @@ class AdaptiveCloudBrain:
             Override for RequestCategory auto-detection.
         intent : str, optional
             Intent label for token estimation.
+        task_text : str, optional
+            User request text used for category/complexity classification when
+            prompt also contains system instructions or conversation context.
+        prepared_request : PrepResult, optional
+            Reuse the exact prepared request when validating its response.
         required_features : set of str, optional
             Features the request requires (checked against provider profile).
         attempt_number : int
@@ -273,14 +280,20 @@ class AdaptiveCloudBrain:
         BrainResult
         """
         # --- Phase 1: Prepare (estimate + pre-validate) ---
-        prep = self.prepare(
+        prep = prepared_request or self.prepare(
             provider=provider,
             model=model,
             prompt=prompt,
             category=category,
             intent=intent,
             required_features=required_features,
+            task_text=task_text,
         )
+        if prep.provider_id != provider or prep.model_id != model:
+            raise ValueError(
+                "Prepared request provider/model do not match the response "
+                "being validated."
+            )
 
         if not prep.ready:
             retry_outcome = self._retry.evaluate_request_failure(
@@ -427,6 +440,7 @@ class AdaptiveCloudBrain:
         category: Optional[str] = None,
         intent: Optional[str] = None,
         required_features: Optional[Set[str]] = None,
+        task_text: Optional[str] = None,
     ) -> PrepResult:
         """
         Run only the pre-dispatch phase (estimate + validate).
@@ -436,12 +450,15 @@ class AdaptiveCloudBrain:
         """
         profile = self._registry.get(provider)
         provider_max = profile.max_output_tokens if profile else None
+        provider_context = profile.context_window if profile else None
 
         estimation = self._estimator.estimate(
             prompt=prompt,
             category=category,
             intent=intent,
             provider_max_output=provider_max,
+            provider_context_window=provider_context,
+            task_text=task_text,
         )
 
         report = self._req_val.validate(
@@ -479,6 +496,7 @@ class AdaptiveCloudBrain:
             model=prep.model_id,
             prompt="",          # prompt already used in prepare()
             raw_response=raw_response,
+            prepared_request=prep,
             attempt_number=attempt_number,
             latency_ms=latency_ms,
         )

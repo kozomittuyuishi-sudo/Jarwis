@@ -13,7 +13,7 @@ using the NL entity extractor.
 
 Design rules
 ------------
-- Fully standalone: no dependency on Ag.py.
+- Fully standalone: no dependency on Jarwis.py.
 - No LLM calls, no network calls.
 - Stdlib only.
 - Python 3.12 compatible.

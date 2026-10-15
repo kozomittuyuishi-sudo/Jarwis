@@ -17,6 +17,8 @@ Boundaries:
 
 from copy import deepcopy
 from datetime import datetime, timezone, timedelta
+import ntpath
+import re
 from typing import Any, Dict, List, Optional
 import uuid
 
@@ -45,6 +47,8 @@ class WorkingMemory:
             "current_task": None,
             "current_topic": None,
             "conversation_reference": {},
+            "action_events": [],
+            "turn_count": 0,
             "temporary_context": {},
             "retrieved_memories": [],
             "temporary_facts": {},
@@ -129,6 +133,254 @@ class WorkingMemory:
 
     def get_conversation_reference(self) -> Dict[str, Any]:
         return deepcopy(self._state.get("conversation_reference", {}))
+
+    def begin_action_event(
+        self,
+        *,
+        action: str,
+        target: str,
+        target_type: str = "UNKNOWN",
+        desired_outcome: str,
+        original_request: Optional[str] = None,
+        request_unit: Optional[Dict[str, Any]] = None,
+        interpretation: Optional[Dict[str, Any]] = None,
+        related_entities: Optional[List[Dict[str, Any]]] = None,
+        depends_on: Optional[List[int]] = None,
+        depends_on_action_ids: Optional[List[str]] = None,
+        result: str = "SUCCESS",
+        source_context: Optional[str] = None,
+        relationship: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create an in-memory record before attempting a meaningful operation."""
+        unit = request_unit or {}
+        event = {
+            "action_id": uuid.uuid4().hex,
+            "original_request": original_request or source_context or "",
+            "request_unit_text": unit.get("text"),
+            "request_unit_index": unit.get("index"),
+            "is_compound": bool(unit.get("is_compound", False)),
+            "depends_on": list(depends_on if depends_on is not None else unit.get("depends_on", ())),
+            "intended_action": str(action).upper(),
+            "action": str(action).upper(),
+            "name": ntpath.basename(str(target).rstrip("\\/")) or str(target),
+            "target": str(target),
+            "original_target": str(target),
+            "resolved_target": None,
+            "target_type": str(target_type).upper(),
+            "resolved_path": None,
+            "desired_outcome": str(desired_outcome),
+            "status": "RUNNING",
+            "result": "RUNNING",
+            "actual_result": None,
+            "verification_status": "PENDING",
+            "verification_evidence": None,
+            "related_entities": deepcopy(related_entities or []),
+            "dependencies": list(depends_on if depends_on is not None else unit.get("depends_on", ())),
+            "depends_on_action_ids": list(depends_on_action_ids or ()),
+            "interpretation": deepcopy(interpretation),
+            "target_resolution": None,
+            "error": None,
+            "failure_stage": None,
+            "turn_id": self._state.get("turn_count", 0),
+            "source_context": source_context,
+            "relationship": relationship,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        events = self._state.setdefault("action_events", [])
+        events.append(event)
+        del events[:-40]
+        self._touch()
+        return deepcopy(event)
+
+    def update_action_event(self, action_id: str, **updates: Any) -> Optional[Dict[str, Any]]:
+        """Update an action record with resolver, executor, and verification evidence."""
+        for event in reversed(self._state.get("action_events", [])):
+            if event.get("action_id") != action_id:
+                continue
+            event.update(deepcopy(updates))
+            if "status" in updates:
+                event["result"] = str(updates["status"]).upper()
+            self._touch()
+            return deepcopy(event)
+        return None
+
+    def record_action_event(
+        self,
+        *,
+        action: str,
+        target: str,
+        target_type: str,
+        resolved_path: str,
+        desired_outcome: str,
+        result: str = "SUCCESS",
+        source_context: Optional[str] = None,
+        relationship: Optional[str] = None,
+        **evidence: Any,
+    ) -> Dict[str, Any]:
+        """Store a completed action using the same structured event contract."""
+        event = self.begin_action_event(
+            action=action,
+            target=target,
+            target_type=target_type,
+            desired_outcome=desired_outcome,
+            original_request=evidence.pop("original_request", source_context),
+            request_unit=evidence.pop("request_unit", None),
+            interpretation=evidence.pop("interpretation", None),
+            related_entities=evidence.pop("related_entities", None),
+            depends_on=evidence.pop("depends_on", None),
+            depends_on_action_ids=evidence.pop("depends_on_action_ids", None),
+            source_context=source_context,
+            relationship=relationship,
+        )
+        path = str(resolved_path)
+        event = self.update_action_event(
+            event["action_id"],
+            target=target,
+            resolved_target=path,
+            resolved_path=path,
+            target_type=str(target_type).upper(),
+            status=str(result).upper(),
+            actual_result=deepcopy(evidence.pop("actual_result", None)),
+            verification_status=evidence.pop("verification_status", "NOT_RECORDED"),
+            verification_evidence=deepcopy(evidence.pop("verification_evidence", None)),
+            **evidence,
+        ) or event
+        return event
+
+    def get_action_events(self) -> List[Dict[str, Any]]:
+        """Return the bounded structured action history."""
+        return deepcopy(self._state.get("action_events", []))
+
+    def get_action_for_request(
+        self,
+        request_unit: Optional[Any] = None,
+        *,
+        mutating_only: bool = False,
+        action: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the action record relevant to a request or the latest operation."""
+        events = self._state.get("action_events", [])
+        if request_unit is not None:
+            original_request = getattr(request_unit, "original_text", None)
+            request_index = getattr(request_unit, "index", None)
+            if original_request is not None and request_index is not None:
+                for event in reversed(events):
+                    if (
+                        event.get("original_request") == original_request
+                        and event.get("request_unit_index") == request_index
+                    ):
+                        return deepcopy(event)
+            dependencies = set(getattr(request_unit, "depends_on", ()))
+            if dependencies:
+                for event in reversed(events):
+                    if (
+                        event.get("original_request") == original_request
+                        and event.get("request_unit_index") in dependencies
+                    ):
+                        return deepcopy(event)
+        actions = {"CREATE", "WRITE", "DELETE", "RENAME", "MOVE", "COPY"}
+        for event in reversed(events):
+            if action and event.get("action") != action.upper():
+                continue
+            if mutating_only and event.get("action") not in actions:
+                continue
+            if event.get("status", event.get("result")) in {"SUCCESS", "FAILED", "PARTIAL"}:
+                return deepcopy(event)
+        return None
+
+    def resolve_context_reference(
+        self,
+        reference: str,
+        *,
+        expected_type: Optional[str] = None,
+        request_unit: Optional[Any] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve references against recent, successful, still-relevant action events."""
+        text = str(reference or "").lower()
+        requested_type = (expected_type or "").upper()
+        if not requested_type:
+            if "file" in text:
+                requested_type = "FILE"
+            elif "folder" in text or "directory" in text:
+                requested_type = "DIRECTORY"
+
+        events = self._state.get("action_events", [])
+        if request_unit is not None and "previous request result" in text:
+            original_request = getattr(request_unit, "original_text", None)
+            dependencies = set(getattr(request_unit, "depends_on", ()))
+            for event in reversed(events):
+                if (
+                    event.get("status") == "SUCCESS"
+                    and event.get("original_request") == original_request
+                    and event.get("request_unit_index") in dependencies
+                    and event.get("resolved_path")
+                ):
+                    return deepcopy(event)
+
+        explicit_name = None
+        for event in reversed(events):
+            name = str(event.get("name") or "")
+            path = str(event.get("resolved_path") or "")
+            if name and re.search(r"(?<![\w.-])" + re.escape(name.lower()) + r"(?![\w.-])", text):
+                explicit_name = name.lower()
+                break
+            basename = ntpath.basename(path.rstrip("\\/")).lower()
+            if basename and re.search(r"(?<![\w.-])" + re.escape(basename) + r"(?![\w.-])", text):
+                explicit_name = basename
+                break
+
+        wants_created = any(term in text for term in ("created", "made", "wrote"))
+        wants_older = any(term in text for term in ("older", "first", "previous"))
+        pronoun_reference = bool(re.search(r"\b(?:it|this|that)\b", text))
+        eligible = []
+        for event in reversed(events):
+            if event.get("status", event.get("result")) != "SUCCESS" or not event.get("resolved_path"):
+                continue
+            if requested_type and event.get("target_type") != requested_type:
+                continue
+            if wants_created and event.get("action") != "CREATE":
+                continue
+            if explicit_name and str(event.get("name", "")).lower() != explicit_name:
+                continue
+            if (
+                pronoun_reference
+                and not explicit_name
+                and not wants_older
+                and self._state.get("turn_count", 0) - event.get("turn_id", self._state.get("turn_count", 0)) > 1
+            ):
+                continue
+            eligible.append(event)
+
+        if not eligible:
+            return None
+        if wants_older:
+            wants_first = bool(re.search(r"\bfirst\b", text))
+            entity_events = [
+                event for event in eligible
+                if event.get("action") == "CREATE"
+            ] or eligible
+            distinct_entities = []
+            seen_paths = set()
+            for event in entity_events:
+                path = event.get("resolved_path")
+                if path not in seen_paths:
+                    seen_paths.add(path)
+                    distinct_entities.append(event)
+            if wants_first:
+                return deepcopy(distinct_entities[-1])
+            return deepcopy(distinct_entities[1] if len(distinct_entities) > 1 else distinct_entities[0])
+
+        # A generic definite description is ambiguous when multiple plausible
+        # entities are available; a pronoun continues the nearest prior action.
+        if explicit_name is None and re.search(r"\bthe\s+(?:file|folder|directory)\b", text):
+            distinct = {event.get("resolved_path") for event in eligible}
+            if len(distinct) > 1:
+                return {
+                    "_ambiguous": True,
+                    "candidates": sorted(path for path in distinct if path),
+                }
+        return deepcopy(eligible[0])
+
 
     # ------------------------------------------------------------------
     # Temporary Facts & Context
@@ -342,6 +594,7 @@ class WorkingMemory:
         self._state["conversation_reference"]["last_input"] = text
         self._state["conversation_reference"]["last_answer"] = str(answer).strip()
         self._state["conversation_reference"]["last_intent"] = intent
+        self._state["turn_count"] = self._state.get("turn_count", 0) + 1
         self._touch()
 
     # ------------------------------------------------------------------
@@ -450,6 +703,7 @@ class WorkingMemory:
             "active_task": self._state["current_task"],
             "active_topic": self._state["current_topic"],
             "conversation_reference": deepcopy(self._state["conversation_reference"]),
+            "action_events": deepcopy(self._state.get("action_events", [])),
             "temporary_facts": deepcopy(self._state["temporary_facts"]),
             "cached_memories": deepcopy(self._state["retrieved_memories"]),
             "scratchpad": deepcopy(self._state["reasoning_scratchpad"]),
@@ -479,7 +733,7 @@ def get_working_memory() -> WorkingMemory:
 # ---------------------------------------------------------------------------
 # Module-level free functions
 #
-# These are imported directly by Ag.py and conversation_manager.py.
+# These are imported directly by Jarwis.py and conversation_manager.py.
 # They delegate to the WorkingMemory instance passed as an argument so
 # that callers don't have to interact with the singleton themselves.
 # ---------------------------------------------------------------------------
@@ -506,7 +760,7 @@ def resolve_followup(user_input: str, working_memory: WorkingMemory) -> str:
     reference stored in Working Memory and the lightweight thread-reference
     resolver.
 
-    ``Ag.py`` calls this as a free function on every turn whose intent is
+    ``Jarwis.py`` calls this as a free function on every turn whose intent is
     ``"unknown"`` *before* falling back to the method-level resolver:
 
         resolved_input = resolve_followup(user_input, working_memory)

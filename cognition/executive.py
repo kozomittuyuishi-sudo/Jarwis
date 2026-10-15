@@ -80,7 +80,7 @@ def interpret_category_decision(user_input: Any, memory: Dict[str, Any]) -> Tupl
     """
     text = str(user_input).strip().lower()
 
-    # Numbers are assigned in the same order Ag.py prints the menu,
+    # Numbers are assigned in the same order Jarwis.py prints the menu,
     # so they always line up with what the user was shown.
     numbered_categories = {
         str(index): category

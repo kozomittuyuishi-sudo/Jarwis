@@ -37,6 +37,38 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import uuid
 
+from quips import RequestUnderstanding
+
+
+class ResolvedEntity:
+    """An entity reference resolved from structured conversational memory."""
+
+    def __init__(
+        self,
+        name: str,
+        entity_type: str,
+        source_context: str,
+        resolved_location: str,
+        relationship: Optional[str] = None,
+        source_action_id: Optional[str] = None,
+    ) -> None:
+        self.name = str(name)
+        self.entity_type = str(entity_type)
+        self.source_context = str(source_context)
+        self.resolved_location = str(resolved_location)
+        self.relationship = relationship
+        self.source_action_id = source_action_id
+
+    def to_dict(self) -> Dict[str, Optional[str]]:
+        return {
+            "name": self.name,
+            "entity_type": self.entity_type,
+            "source_context": self.source_context,
+            "resolved_location": self.resolved_location,
+            "relationship": self.relationship,
+            "source_action_id": self.source_action_id,
+        }
+
 
 class Thought:
     """
@@ -126,6 +158,10 @@ class Thought:
         self.requires_context: bool = False
         self.missing_information: List[str] = []
         self.detected_entities: List[Dict[str, Any]] = []
+        self.request_understanding: Optional[RequestUnderstanding] = None
+        self.resolved_entity: Optional[ResolvedEntity] = None
+        self.is_complete: bool = True
+        self.semantic_reasoning_required: bool = False
 
         # Context resolution (ContextResolver fills these)
         self.candidate_contexts: List[Dict[str, Any]] = []
@@ -255,6 +291,16 @@ class Thought:
             "requires_context": self.requires_context,
             "missing_information": list(self.missing_information),
             "detected_entities": deepcopy(self.detected_entities),
+            "request_understanding": (
+                self.request_understanding.to_dict()
+                if self.request_understanding is not None else None
+            ),
+            "resolved_entity": (
+                self.resolved_entity.to_dict()
+                if self.resolved_entity is not None else None
+            ),
+            "is_complete": self.is_complete,
+            "semantic_reasoning_required": self.semantic_reasoning_required,
             "candidate_contexts": deepcopy(self.candidate_contexts),
             "resolved_input": self.resolved_input,
             "confidence": self.confidence,

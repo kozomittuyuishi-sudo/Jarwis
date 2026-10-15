@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import Ag
+import Jarwis as Ag
 from preprocessor_brain import PreprocessorBrain
 from quips import analyze_request
 
@@ -24,7 +24,7 @@ def test_compound_self_info_is_lossless_and_never_calls_brain():
     with patch.object(Ag, "ask_brain", side_effect=AssertionError("LLM must not be called")):
         response = _run(query, PreprocessorBrain())
 
-    assert "Ambient Guidance" in response
+    assert "I am Jarwis" in response
     assert "I can currently" in response
     assert "deterministic offline processing layer" in response
 

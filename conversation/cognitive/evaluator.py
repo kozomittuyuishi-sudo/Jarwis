@@ -7,9 +7,10 @@ The CognitiveEvaluator is the first stage in the pipeline after a Thought
 is created.  Its only job is to understand the user's message.
 
 It NEVER answers questions.
-It NEVER calls the Brain.
 It NEVER generates responses.
 It NEVER uses hardcoded keyword lists for pronouns ("he", "she", "it").
+The request-understanding path stays deterministic unless an optional semantic
+reasoner is supplied; that callback returns interpretation data only.
 
 For every input it determines:
     1. What is the user's intent?
@@ -26,7 +27,7 @@ The evaluator uses structural reasoning rather than keyword matching:
 After evaluation, it populates the Thought object and returns it.
 
 Design principles:
-    - Deterministic. No LLM calls.
+    - Deterministic first; optional semantic fallback returns data only.
     - Reason structurally: detect information gaps, not specific words.
     - Feed the ContextResolver enough information to do its job.
     - Log every decision in the Thought's reasoning_log.
@@ -35,12 +36,15 @@ Design principles:
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from dataclasses import replace
+from typing import Any, Callable, Dict, List, Mapping, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from core.thought import Thought
+    from conversation.core.thought import Thought
 
 from conversation.cognitive.confidence_engine import ConfidenceEngine, ResolutionScore
+from quips import DesiredOutcome, RequestUnderstanding
+from target_resolution_models import TargetType
 
 
 # ---------------------------------------------------------------------------
@@ -171,8 +175,240 @@ class CognitiveEvaluator:
         # thought.requires_context, thought.missing_information, etc. are now set
     """
 
-    def __init__(self, confidence_engine: Optional[ConfidenceEngine] = None) -> None:
+    def __init__(
+        self,
+        confidence_engine: Optional[ConfidenceEngine] = None,
+        semantic_reasoner: Optional[Callable[[str, Dict[str, Any]], Mapping[str, Any]]] = None,
+    ) -> None:
         self._confidence = confidence_engine or ConfidenceEngine()
+        self._semantic_reasoner = semantic_reasoner
+
+    def evaluate_request(
+        self,
+        thought: "Thought",
+        request_unit: Any,
+        working_memory: Optional[Any] = None,
+    ) -> "Thought":
+        """Evaluate QUIPS's structure and resolve memory references before optional fallback."""
+        understanding = getattr(request_unit, "understanding", None)
+        if understanding is None:
+            thought.log("evaluator", "QUIPS supplied no structured interpretation.")
+            return thought
+
+        thought.request_understanding = understanding
+        thought.semantic_reasoning_required = understanding.semantic_reasoning_required
+        thought.is_complete = understanding.is_complete
+        thought.log(
+            "evaluator",
+            f"Request meaning: {understanding.action} {understanding.target!r}; "
+            f"outcome={understanding.desired_outcome}, domain={understanding.domain}.",
+        )
+
+        target_reference = getattr(request_unit, "target_reference", None)
+        has_result_reference = "previous request result" in understanding.references
+        if (
+            working_memory is not None
+            and (
+                has_result_reference
+                or (
+                    target_reference is not None
+                    and target_reference.resolution_mode == "CONTEXT_REFERENCE"
+                )
+            )
+        ):
+            event = working_memory.resolve_context_reference(
+                understanding.target or "the thing I created earlier",
+                expected_type=(
+                    understanding.target_type
+                    if understanding.target_type != TargetType.UNKNOWN else None
+                ),
+                request_unit=request_unit,
+            )
+            if event is not None and event.get("_ambiguous"):
+                candidates = event.get("candidates", [])
+                options = "; ".join(candidates)
+                thought.request_clarification(
+                    f"Which {understanding.target_type.lower() if understanding.target_type != TargetType.UNKNOWN else 'filesystem item'} do you mean? "
+                    f"Possible matches: {options}"
+                )
+                thought.is_complete = False
+                thought.flag_missing("an unambiguous previous filesystem entity")
+                thought.log("evaluator", "The contextual target matches multiple prior filesystem entities.")
+            elif event is not None:
+                from conversation.core.thought import ResolvedEntity
+
+                thought.resolved_entity = ResolvedEntity(
+                    name=event["name"],
+                    entity_type=event["target_type"],
+                    source_context=event["source_context"] or event["action"],
+                    resolved_location=event["resolved_path"],
+                    relationship=event["relationship"],
+                    source_action_id=event.get("action_id"),
+                )
+                thought.resolved_input = event["resolved_path"]
+                thought.request_understanding = replace(
+                    understanding,
+                    target=event["name"],
+                    target_type=event["target_type"],
+                    references=(),
+                    context_requirements=(),
+                    missing_information=(),
+                    is_complete=True,
+                    semantic_reasoning_required=False,
+                )
+                thought.is_complete = True
+                thought.semantic_reasoning_required = False
+                thought.log(
+                    "evaluator",
+                    f"Resolved contextual target to {event['resolved_path']!r} "
+                    "from a prior successful action event.",
+                )
+            else:
+                thought.is_complete = False
+                thought.flag_missing("a matching previous filesystem entity")
+                thought.log("evaluator", "No suitable previous entity is available.")
+
+        if thought.semantic_reasoning_required and self._semantic_reasoner is not None:
+            context = (
+                working_memory.build_context()
+                if working_memory is not None else {}
+            )
+            interpreted = self._semantic_reasoner(thought.raw_input, context)
+            thought.request_understanding = self._validate_semantic_interpretation(
+                understanding, interpreted,
+            )
+            thought.is_complete = thought.request_understanding.is_complete
+            thought.semantic_reasoning_required = False
+            thought.log("semantic_reasoner", "Structured interpretation accepted; no operation executed.")
+        elif thought.semantic_reasoning_required:
+            thought.log("semantic_reasoner", "Semantic interpretation is required but no reasoner is configured.")
+
+        interpretation = thought.request_understanding
+        if (
+            interpretation is not None
+            and interpretation.domain == "FILESYSTEM"
+            and interpretation.references
+            and thought.resolved_entity is None
+        ):
+            event = None
+            if working_memory is not None:
+                event = working_memory.resolve_context_reference(
+                    " ".join(interpretation.references) or interpretation.target or "",
+                    expected_type=(
+                        interpretation.target_type
+                        if interpretation.target_type != TargetType.UNKNOWN else None
+                    ),
+                    request_unit=request_unit,
+                )
+            if event is not None and event.get("_ambiguous"):
+                candidates = event.get("candidates", [])
+                thought.request_clarification(
+                    "Which previous filesystem item do you mean? Possible matches: "
+                    + "; ".join(candidates)
+                )
+                thought.is_complete = False
+                thought.flag_missing("an unambiguous previous filesystem entity")
+                thought.log("evaluator", "The semantic reference matches multiple prior filesystem entities.")
+            elif event is not None:
+                from conversation.core.thought import ResolvedEntity
+
+                thought.resolved_entity = ResolvedEntity(
+                    name=event["name"],
+                    entity_type=event["target_type"],
+                    source_context=event["source_context"] or event["action"],
+                    resolved_location=event["resolved_path"],
+                    relationship=event["relationship"],
+                    source_action_id=event.get("action_id"),
+                )
+                thought.resolved_input = event["resolved_path"]
+                thought.request_understanding = replace(
+                    interpretation,
+                    target=event["name"],
+                    target_type=event["target_type"],
+                    context_requirements=(),
+                    missing_information=(),
+                    is_complete=True,
+                )
+                thought.is_complete = True
+                thought.log("evaluator", f"Resolved semantic reference to {event['resolved_path']!r}.")
+            else:
+                missing = tuple(dict.fromkeys((
+                    *interpretation.missing_information,
+                    "matching previous filesystem entity",
+                )))
+                thought.request_understanding = replace(
+                    interpretation,
+                    missing_information=missing,
+                    is_complete=False,
+                )
+                thought.is_complete = False
+                thought.flag_missing("a matching previous filesystem entity")
+                thought.log("evaluator", "No suitable previous entity is available.")
+        return thought
+
+    @staticmethod
+    def _validate_semantic_interpretation(
+        original: RequestUnderstanding,
+        value: Mapping[str, Any],
+    ) -> RequestUnderstanding:
+        """Accept only structured interpretation fields; this layer cannot execute actions."""
+        if not isinstance(value, Mapping):
+            raise TypeError("Semantic reasoner must return a structured mapping.")
+        allowed = {
+            "action", "target", "destination", "target_type", "domain", "desired_outcome",
+            "references", "context_requirements", "missing_information", "is_complete",
+        }
+        if set(value) - allowed:
+            raise ValueError("Semantic reasoner returned unsupported interpretation fields.")
+        target_type = value.get("target_type", original.target_type)
+        if target_type not in {TargetType.FILE, TargetType.DIRECTORY, TargetType.UNKNOWN}:
+            raise ValueError("Semantic reasoner returned an unsupported target type.")
+        domain = value.get("domain", original.domain)
+        if domain not in {"FILESYSTEM", "SELF_INFO", "CONVERSATION", "MEMORY", "GENERAL"}:
+            raise ValueError("Semantic reasoner returned an unsupported request domain.")
+        outcome = value.get("desired_outcome", original.desired_outcome)
+        if outcome not in {
+            DesiredOutcome.OPEN_TARGET, DesiredOutcome.OPEN_DIRECTORY,
+            DesiredOutcome.DIRECTORY_CONTENTS, DesiredOutcome.FILE_CONTENT,
+            DesiredOutcome.EXPLAIN_TARGET, DesiredOutcome.EXPLAIN_FILE,
+            DesiredOutcome.EXPLAIN_RESULT,
+            DesiredOutcome.CREATE_FILE, DesiredOutcome.CREATE_DIRECTORY,
+            DesiredOutcome.WRITE_FILE,
+            DesiredOutcome.DELETE_TARGET, DesiredOutcome.RENAME_TARGET,
+            DesiredOutcome.MOVE_TARGET, DesiredOutcome.COPY_TARGET,
+            DesiredOutcome.GENERAL_RESPONSE, DesiredOutcome.SELF_INFORMATION,
+            DesiredOutcome.CONVERSATION_CONTEXT, DesiredOutcome.WORKSPACE_INFORMATION,
+            DesiredOutcome.MEMORY_OPERATION,
+        }:
+            raise ValueError("Semantic reasoner returned an unsupported desired outcome.")
+        target = value.get("target", original.target)
+        destination = value.get("destination", original.destination)
+        missing = tuple(value.get("missing_information", original.missing_information))
+        complete = bool(value.get("is_complete", original.is_complete))
+        if domain == "FILESYSTEM" and outcome not in {
+            DesiredOutcome.WORKSPACE_INFORMATION,
+        } and not target:
+            missing = tuple(dict.fromkeys((*missing, "filesystem target")))
+            complete = False
+        if domain == "FILESYSTEM" and outcome in {
+            DesiredOutcome.RENAME_TARGET, DesiredOutcome.MOVE_TARGET,
+            DesiredOutcome.COPY_TARGET,
+        } and not destination:
+            missing = tuple(dict.fromkeys((*missing, "rename destination")))
+            complete = False
+        return RequestUnderstanding(
+            action=str(value.get("action", original.action)),
+            target=target,
+            target_type=target_type,
+            domain=domain,
+            desired_outcome=outcome,
+            destination=destination,
+            references=tuple(value.get("references", original.references)),
+            context_requirements=tuple(value.get("context_requirements", original.context_requirements)),
+            missing_information=missing,
+            is_complete=complete,
+            semantic_reasoning_required=False,
+        )
 
     # ------------------------------------------------------------------
     # Primary entry point
@@ -183,7 +419,7 @@ class CognitiveEvaluator:
         Evaluate the Thought and populate all evaluator-owned fields.
 
         :param thought: The Thought object to evaluate (mutated in-place).
-        :param intent_from_ag: Optional intent label from Ag.py's ``detect_intent()``.
+        :param intent_from_ag: Optional intent label from Jarwis.py's ``detect_intent()``.
                                 If provided it is used as the primary intent;
                                 otherwise the evaluator classifies it internally.
         :returns: The mutated Thought (for chaining).
@@ -242,12 +478,12 @@ class CognitiveEvaluator:
         return thought
 
     # ------------------------------------------------------------------
-    # Intent classification (lightweight; Ag.py's detect_intent takes priority)
+    # Intent classification (lightweight; Jarwis.py's detect_intent takes priority)
     # ------------------------------------------------------------------
 
     def _classify_intent(self, raw_input: str) -> str:
         """
-        Classify the intent when Ag.py has not already done so.
+        Classify the intent when Jarwis.py has not already done so.
         Returns a broad category string.
         """
         text = raw_input.strip().lower().replace("?", "")

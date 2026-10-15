@@ -26,8 +26,8 @@ from typing import Any, Dict, List, Optional
 # ======================================================================
 # 1. Action Pattern Analyzer (pre-existing, preserved as-is)
 #
-# Ag.py imports analyze_action_pattern() directly - kept unchanged so
-# the existing brain-switch integration in Ag.py keeps working.
+# Jarwis.py imports analyze_action_pattern() directly - kept unchanged so
+# the existing brain-switch integration in Jarwis.py keeps working.
 # ======================================================================
 
 PERMANENT_PATTERNS = [

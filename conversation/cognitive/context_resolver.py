@@ -29,7 +29,7 @@ Design principles
   reference slot needs filling (from the Thought's ``missing_information``),
   then looks for a candidate in context.
 - Works entirely from the Thought + ConversationContext / EntityRegistry
-  passed in by WorkingMemory.  No direct imports of Ag.py.
+  passed in by WorkingMemory.  No direct imports of Jarwis.py.
 
 Example
 -------

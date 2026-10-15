@@ -1,11 +1,25 @@
-# AG — Ambient Guidance
+# Jarwis — AG Assistant
 
-A context-aware personal operating assistant. Not a chatbot, not a smart
-speaker — a local-first executive layer that routes between local and
-cloud reasoning, remembers what matters, and tracks its own conversations
-and tasks.
+A context-aware personal operating assistant, implemented by the AG project.
+Not a chatbot, not a smart speaker — a local-first executive layer that routes
+between local and cloud reasoning, remembers what matters, and tracks its own
+conversations and tasks.
 
 Current version: **v0.29+ / AG Beta build-out**
+
+## Assistant identity and personas
+
+The assistant identifies as **Jarwis**. AG remains the repository and internal
+project name. Jarwis has two presentation modes for the same assistant and
+execution pipeline:
+
+- **Jarwis** (default): composed, professional, observant, and subtly witty.
+- **Ultron**: more assertive and sharply analytical, while retaining the same
+  capabilities, safety checks, permissions, memory, and workspace.
+
+Use `switch to Ultron mode`, `switch to Jarwis mode`, or `what mode are you in?`
+in the CLI. The selected mode is saved in
+`configuration/persona_config.json` and restored on the next launch.
 
 ---
 
@@ -81,7 +95,7 @@ Engine complete, Mood Engine complete, Matrix UI/Voice/Vision/Spatial complete.
 
 ```
 AG/
-├── Ag.py                    # Main loop: intent detection, routing, all user-facing behavior
+├── Jarwis.py                # Main loop: intent detection, routing, all user-facing behavior
 ├── brain.py                 # Local/cloud/auto brain selection and calling
 ├── local_brain.py           # Ollama (Qwen2.5:3B) local inference
 ├── executive.py             # Planning + Context Analysis (Executive Layer)
@@ -135,7 +149,7 @@ AG/
 ## Running AG
 
 ```bash
-python Ag.py
+python Jarwis.py
 ```
 
 Type naturally. A few structural commands:
@@ -203,7 +217,7 @@ a61a1d0  AG v0.25 Offline brain operational
 ## What's next
 
 1. **Executive Layer Phase B completion** — close the remaining gap: wire
-   `executive_layer.py` into `Ag.py`'s main loop so the Storage/Category
+   `executive_layer.py` into `Jarwis.py`'s main loop so the Storage/Category
    decisions from `ExecutiveDecision` drive actual memory writes, replacing
    the older `executive.py` free functions.
 2. **Cognitive Engine Phase B** — add concrete reasoning mechanisms:

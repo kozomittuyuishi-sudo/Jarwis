@@ -200,10 +200,10 @@ class TestReports:
         assert est.category == ResponseCategory.LARGE_REPORT
 
     def test_report_budget_at_least_2048_unless_capped(self):
-        """Report budget is 4096 by default — well above 2048."""
+        """Report budget is 2048 by default, irrespective of unknown credits."""
         m = fresh_manager(provider_max=8192)
         est = m.estimate("Write a detailed report on renewable energy.", intent="unknown")
-        assert est.max_tokens >= 2048
+        assert est.max_tokens == 2048
 
     def test_report_budget_capped_by_provider_max(self):
         m = fresh_manager(provider_max=1024)

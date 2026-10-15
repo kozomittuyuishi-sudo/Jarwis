@@ -15,7 +15,7 @@ Design rules:
   diagnostics) are safe to call at any time and never raise.
 - Stdlib only inside adapter methods.
 
-Usage (from Ag.py main()):
+Usage (from Jarwis.py main()):
 ::
 
     from runtime_adapter import build_registry

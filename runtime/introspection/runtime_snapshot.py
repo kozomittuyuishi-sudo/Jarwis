@@ -25,7 +25,7 @@ Immutability
 The snapshot uses Python's ``__slots__`` and raises ``AttributeError`` on
 any attempt to mutate a field after construction.
 
-The snapshot is NOT connected to Cloud Brain, NOT connected to Ag.py,
+The snapshot is NOT connected to Cloud Brain, NOT connected to Jarwis.py,
 and NOT exposed through chat.  It is a standalone data object.
 
 Stdlib only.

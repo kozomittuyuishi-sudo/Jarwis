@@ -10,8 +10,8 @@ Covers the 14 test cases from the bug report:
  2.  "List everything in the current directory." → DIRECTORY_OP/list, zero Brain calls.
  3.  "Switch to D:\\AG\\tests" → DIRECTORY_OP/switch, consistent every time.
  4.  "What is the active directory now?" → LOCAL_STATE_QUERY.
- 5.  "Read Ag.py." → FILE_OP/read (not DIRECTORY_OP).
- 6.  "Read <Ag.py> and explain what it does." → FILE_OP/read, strips <>.
+ 5.  "Read Jarwis.py." → FILE_OP/read (not DIRECTORY_OP).
+ 6.  "Read <Jarwis.py> and explain what it does." → FILE_OP/read, strips <>.
  7.  "Create a file called directory_test.txt and write: <content>"
      → FILE_OP/create_file, target == 'directory_test.txt'.
  8.  "Create a folder called AB_Test." → DIRECTORY_OP/create_folder, target == 'AB_Test'.
@@ -123,12 +123,12 @@ def test_4_active_directory_now_is_local_state():
 
 
 # ===========================================================================
-# Test 5: "Read Ag.py." → FILE_OP / read (NOT DIRECTORY_OP)
+# Test 5: "Read Jarwis.py." → FILE_OP / read (NOT DIRECTORY_OP)
 # ===========================================================================
 
 def test_5_read_file_routes_to_file_op():
     """A read of a .py file must be FILE_OP, not a directory load."""
-    result = classify("Read Ag.py.")
+    result = classify("Read Jarwis.py.")
     assert result.intent == Intent.FILE_OP, (
         f"Expected FILE_OP, got {result.intent!r}"
     )
@@ -136,17 +136,17 @@ def test_5_read_file_routes_to_file_op():
         f"Expected sub_op='read', got {result.sub_op!r}"
     )
     assert result.target is not None, "target must be extracted"
-    assert "Ag.py" in result.target, (
-        f"Expected 'Ag.py' in target, got {result.target!r}"
+    assert "Jarwis.py" in result.target, (
+        f"Expected 'Jarwis.py' in target, got {result.target!r}"
     )
 
 
 # ===========================================================================
-# Test 6: "Read <Ag.py> and explain what it does." → strips <>, FILE_OP
+# Test 6: "Read <Jarwis.py> and explain what it does." → strips <>, FILE_OP
 # ===========================================================================
 
 def test_6_read_with_angle_brackets_strips_wrappers():
-    result = classify("Read <Ag.py> and explain what it does.")
+    result = classify("Read <Jarwis.py> and explain what it does.")
     assert result.intent == Intent.FILE_OP, (
         f"Expected FILE_OP, got {result.intent!r}"
     )
@@ -154,9 +154,9 @@ def test_6_read_with_angle_brackets_strips_wrappers():
         f"Expected sub_op='read', got {result.sub_op!r}"
     )
     assert result.target is not None, "target must be extracted"
-    # After stripping <>, target should be exactly 'Ag.py'
-    assert result.target == "Ag.py", (
-        f"Expected target='Ag.py' (stripped), got {result.target!r}"
+    # After stripping <>, target should be exactly 'Jarwis.py'
+    assert result.target == "Jarwis.py", (
+        f"Expected target='Jarwis.py' (stripped), got {result.target!r}"
     )
 
 

@@ -53,8 +53,8 @@ class ResponseCategory(str, Enum):
     NORMAL_CONV       = "normal_conversation"# 512  tokens
     REASONING         = "reasoning"          # 1024 tokens
     LONG_EXPLANATION  = "long_explanation"   # 2048 tokens
-    LARGE_REPORT      = "large_report"       # 4096 tokens
-    VERY_LARGE        = "very_large"         # 8192 tokens
+    LARGE_REPORT      = "large_report"       # 2048 tokens
+    VERY_LARGE        = "very_large"         # 2048 tokens
 
 
 # ---------------------------------------------------------------------------
@@ -81,14 +81,14 @@ class TokenBudgetConfig:
     budgets: Dict[ResponseCategory, int] = field(default_factory=lambda: {
         ResponseCategory.GREETING:         128,
         ResponseCategory.SHORT_FACTUAL:    256,
-        ResponseCategory.NORMAL_CONV:      512,
+        ResponseCategory.NORMAL_CONV:      384,
         ResponseCategory.REASONING:       1024,
-        ResponseCategory.LONG_EXPLANATION:2048,
-        ResponseCategory.LARGE_REPORT:    4096,
-        ResponseCategory.VERY_LARGE:      8192,
+        ResponseCategory.LONG_EXPLANATION:1536,
+        ResponseCategory.LARGE_REPORT:    2048,
+        ResponseCategory.VERY_LARGE:      2048,
     })
-    provider_max: int   = 4096   # conservative cap — well within any credit tier
-    fallback_budget: int = 512   # retry budget after a 402 / token rejection
+    provider_max: int   = 2048   # output cap; account credit availability is unknown
+    fallback_budget: int = 512   # retry budget after a retryable request rejection
     safe_default: int   = 512    # used when category is unknown
 
     def budget_for(self, category: ResponseCategory) -> int:
@@ -208,7 +208,7 @@ class TokenBudgetManager:
         Estimate the token budget for a single cloud brain request.
 
         :param prompt: The full prompt text that will be sent.
-        :param intent: Optional intent label from detect_intent() in Ag.py.
+        :param intent: Optional intent label from detect_intent() in Jarwis.py.
         :returns: BudgetEstimate with the recommended max_tokens.
         """
         reasoning: List[str] = []

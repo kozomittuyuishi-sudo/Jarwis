@@ -273,7 +273,33 @@ class TestTokenEstimator:
         est = TokenEstimator()
         result = est.estimate("Write a comprehensive report on machine learning.")
         assert result.category == RequestCategory.LARGE_REPORT
-        assert result.max_tokens >= 4096
+        assert result.max_tokens == 2048
+
+    def test_output_budget_leaves_room_for_prompt_in_context_window(self):
+        est = TokenEstimator()
+        result = est.estimate(
+            "Explain this briefly. " * 30,
+            category="large_report",
+            provider_max_output=8192,
+            provider_context_window=512,
+        )
+        assert result.max_tokens <= 512 - result.estimated_prompt_tokens - 128
+
+    def test_complexity_uplift_is_still_clamped_before_provider_dispatch(self):
+        config = EstimatorConfig(provider_safety_cap=4096)
+        config.category_budgets[RequestCategory.LARGE_REPORT] = 4096
+        task = "Write a detailed report, first then finally compare two strategies? Why?"
+
+        result = TokenEstimator(config).estimate(
+            task,
+            provider_max_output=8192,
+            provider_context_window=128000,
+            task_text=task,
+        )
+
+        assert result.complexity_score == pytest.approx(0.6)
+        assert any("4505 tokens" in step for step in result.reasoning)
+        assert result.max_tokens == 4096
 
     def test_reasoning_keyword_detection(self):
         est = TokenEstimator()
@@ -620,11 +646,11 @@ class TestResponseValidator:
         axis = result.axis_result(ValidationAxis.FINISH_REASON)
         assert axis.passed is True
 
-    def test_truncated_finish_reason_passes_with_note(self):
+    def test_truncated_finish_reason_fails_validation(self):
         v = ResponseValidator()
         result = v.validate(make_good_response(finish_reason="length"))
         axis = result.axis_result(ValidationAxis.FINISH_REASON)
-        assert axis.passed is True
+        assert axis.passed is False
 
     def test_unknown_finish_reason_fails(self):
         v = ResponseValidator()
@@ -972,6 +998,21 @@ class TestAdaptiveCloudBrain:
         )
         assert result.status == BrainStatus.PASSED
         assert result.passed is True
+
+    def test_response_validation_reuses_actual_request_budget(self):
+        brain = self._make_brain()
+        prep = brain.prepare(
+            "openrouter",
+            "deepseek/deepseek-v4-flash-0731",
+            "System prompt and recent context.\nUser: brainstorm this.",
+            task_text="Brainstorm practical options.",
+        )
+
+        result = brain.validate_response(make_good_response(), prep)
+
+        assert result.status == BrainStatus.PASSED
+        assert result.max_tokens_used == prep.max_tokens
+        assert result.estimation == prep.estimation
 
     def test_full_pipeline_no_response_returns_ready(self):
         brain = self._make_brain()
