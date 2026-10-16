@@ -23,6 +23,7 @@ Design rules
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -176,6 +177,10 @@ _DIR_LIST_EXACT: frozenset[str] = frozenset({
 # Prefix tables: (prefix, intent, sub_op)
 # Checked in order; first match wins.
 _PREFIX_RULES: list[tuple[str, str, str]] = [
+    # Navigation verbs must precede the broader "move " file-operation rule.
+    ("go to ",                 Intent.DIRECTORY_OP, "navigate"),
+    ("navigate to ",           Intent.DIRECTORY_OP, "navigate"),
+    ("move into ",             Intent.DIRECTORY_OP, "navigate"),
     # DIRECTORY_OP — create folder (must appear BEFORE generic create_file rules)
     ("create a folder called ",    Intent.DIRECTORY_OP, "create_folder"),
     ("create a folder named ",     Intent.DIRECTORY_OP, "create_folder"),
@@ -210,10 +215,6 @@ _PREFIX_RULES: list[tuple[str, str, str]] = [
     ("switch to ",            Intent.DIRECTORY_OP, "switch"),
     ("cd ",                   Intent.DIRECTORY_OP, "switch"),
     ("change directory to ",  Intent.DIRECTORY_OP, "switch"),
-    # DIRECTORY_OP — navigate (go to / navigate to / move into)
-    ("go to ",                Intent.DIRECTORY_OP, "navigate"),
-    ("navigate to ",          Intent.DIRECTORY_OP, "navigate"),
-    ("move into ",            Intent.DIRECTORY_OP, "navigate"),
     # DIRECTORY_OP — set
     ("work in ",              Intent.DIRECTORY_OP, "set"),
     ("use ",                  Intent.DIRECTORY_OP, "set"),
@@ -273,14 +274,34 @@ class IntentRouter:
         IntentResult
         """
         raw = user_input
-        normalized = user_input.strip().lower().replace("?", "").replace("!", "").rstrip(".")
+        normalized = user_input.strip().lower().rstrip()
+        normalized = re.sub(r"[?!]+$", "", normalized).rstrip()
+        if normalized.endswith(".") and not normalized.endswith(".."):
+            normalized = normalized[:-1].rstrip()
 
         # ----------------------------------------------------------------
-        # 1. LOCAL_STATE_QUERY (exact match)
+        # 1. LOCAL_STATE_QUERY (known phrases and normalized interrogatives)
         # ----------------------------------------------------------------
-        if normalized in _LOCAL_STATE_EXACT:
+        if normalized in _LOCAL_STATE_EXACT or re.fullmatch(
+            r"what\s+is\s+(?:my|your|the)\s+(?:current|active)\s+"
+            r"(?:workspace|directory)",
+            normalized,
+        ):
             return IntentResult(
                 intent=Intent.LOCAL_STATE_QUERY,
+                raw_input=raw,
+            )
+
+        _PARENT_EXACT: frozenset[str] = frozenset({
+            "go back", "go up", "cd ..", "back", "..",
+            "go to parent", "go to ..",
+            "navigate to parent", "navigate to ..",
+            "move to parent", "move to ..",
+        })
+        if normalized in _PARENT_EXACT:
+            return IntentResult(
+                intent=Intent.DIRECTORY_OP,
+                sub_op="go_back",
                 raw_input=raw,
             )
 

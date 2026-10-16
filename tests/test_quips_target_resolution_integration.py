@@ -32,6 +32,15 @@ def test_workspace_relative_target_is_preserved():
     assert result.status in {"RESOLVED", "NOT_FOUND"}
 
 
+def test_explicit_navigation_phrases_preserve_the_directory_target():
+    for query in ("go to brains", "navigate to brains", "move into brains"):
+        unit = analyze_request(query, _legacy_intent).requests[0]
+
+        assert unit.category == "FILE_OPERATION"
+        assert unit.intent == "NAVIGATE_DIRECTORY"
+        assert unit.target_reference.original_target == "brains"
+
+
 def test_named_scope_target_is_wrapped_in_target_reference():
     workspace = str(Path(__file__).resolve().parents[1])
     unit = analyze_request("read test.txt in AG", _legacy_intent).requests[0]

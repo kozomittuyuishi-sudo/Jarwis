@@ -7,6 +7,10 @@ Category Decisions (Structured vs Dynamic on the fly).
 """
 
 from cognition.executive_layer import ExecutiveLayer, ExecutiveDecision
+from dataclasses import replace
+from types import SimpleNamespace
+
+from quips import analyze_request
 
 
 def test_storage_decision_triggers():
@@ -59,6 +63,67 @@ def test_process_execution_cycle():
     assert decision.is_dynamic_category is True
     assert decision.memory_entry is not None
     print("✓ test_process_execution_cycle passed")
+
+
+def test_anvil_builds_inspectable_plan_without_execution():
+    analysis = analyze_request(
+        "Create folder Experiments, then create notes.txt inside it, "
+        "write 'Hello and then goodbye' into the file, and read it back."
+    )
+
+    plan = ExecutiveLayer().analyze_action_plan(analysis)
+
+    assert plan.valid
+    assert [step.step_id for step in plan.steps] == [
+        "step-1", "step-2", "step-3", "step-4",
+    ]
+    assert plan.steps[2].arguments["content"] == "Hello and then goodbye"
+    assert plan.connectors == ["then", "inside", "and"]
+    assert plan.steps[1].dependencies == ["step-1"]
+    assert plan.steps[2].dependencies == ["step-2"]
+    assert plan.steps[3].dependencies == ["step-3"]
+    assert all(step.execution_status == "PENDING" for step in plan.steps)
+
+
+def test_anvil_reports_empty_and_malformed_quips_structures():
+    executive = ExecutiveLayer()
+    empty = executive.analyze_action_plan(analyze_request(""))
+    malformed = executive.analyze_action_plan(SimpleNamespace(original_text="request"))
+
+    assert empty.valid is False
+    assert empty.diagnostics[0]["stage"] == "parsing"
+    assert malformed.valid is False
+    assert malformed.diagnostics[0]["stage"] == "structure"
+
+
+def test_anvil_detects_missing_arguments_and_invalid_dependencies():
+    executive = ExecutiveLayer()
+    missing = executive.analyze_action_plan(analyze_request("create a file"))
+    original = analyze_request("create first.txt and create second.txt")
+    cyclic_units = [
+        replace(original.requests[0], depends_on=(1,)),
+        replace(original.requests[1], depends_on=(0,)),
+    ]
+    missing_dependency_units = [
+        original.requests[0],
+        replace(original.requests[1], depends_on=(99,)),
+    ]
+    cyclic = executive.analyze_action_plan(
+        SimpleNamespace(original_text=original.original_text, requests=cyclic_units)
+    )
+    invalid_reference = executive.analyze_action_plan(
+        SimpleNamespace(original_text=original.original_text, requests=missing_dependency_units)
+    )
+    ambiguous = executive.analyze_action_plan(
+        analyze_request("create alpha.txt or beta.txt")
+    )
+
+    assert any(item["stage"] == "validation" for item in missing.diagnostics)
+    assert cyclic.valid is False
+    assert any(item["stage"] == "dependencies" for item in cyclic.diagnostics)
+    assert invalid_reference.valid is False
+    assert ambiguous.valid is False
+    assert any(item["stage"] == "ambiguity" for item in ambiguous.diagnostics)
 
 
 def run_all_tests():

@@ -1335,6 +1335,45 @@ def _record_preprocessor_action(
     )
 
 
+def _update_anvil_step(
+    action_plan,
+    working_memory: Optional[WorkingMemory],
+    request_unit: RequestUnit,
+    *,
+    status: str,
+    actual_result=None,
+    error: Optional[str] = None,
+) -> None:
+    if action_plan is None:
+        return
+    action_record = (
+        working_memory.get_action_for_request(request_unit)
+        if working_memory is not None and request_unit.is_target_request
+        else None
+    )
+    action_plan.update_step(
+        f"step-{request_unit.index + 1}",
+        status=status,
+        actual_result=(
+            actual_result
+            if actual_result is not None
+            else action_record.get("actual_result") if action_record else None
+        ),
+        error=error or (action_record.get("error") if action_record else None),
+    )
+    if working_memory is not None:
+        working_memory.add_fact("anvil_current_step", f"step-{request_unit.index + 1}")
+        working_memory.add_fact("anvil_last_plan", action_plan.to_dict())
+
+
+def _first_quips_request(quips_result) -> Optional[RequestUnit]:
+    requests = getattr(quips_result, "requests", None)
+    if not isinstance(requests, (list, tuple)) or not requests:
+        return None
+    request = requests[0]
+    return request if isinstance(request, RequestUnit) else None
+
+
 def process_input(
     user_input,
     memory,
@@ -1356,6 +1395,7 @@ def process_input(
     request_unit: Optional[RequestUnit] = None,
     working_memory: Optional[WorkingMemory] = None,
     semantic_reasoner=None,
+    action_plan=None,
 ):
     controller = get_persona_controller()
     controller.prepare_turn(str(user_input or ""), intent)
@@ -1404,6 +1444,33 @@ def process_input(
             f"{event['name']} at {resolved_path}."
         )
 
+    if (
+        request_unit is not None
+        and request_unit.intent == "EXPLAIN_RESULT"
+        and re.search(
+            r"\bexact\s+(?:path|location)\b.*\b(?:content|contents)\b",
+            request_unit.text,
+            re.IGNORECASE,
+        )
+    ):
+        if working_memory is None:
+            return "Jarwis: I don't have a recorded, verified result with an exact path and content."
+        event = working_memory.get_action_for_request(request_unit)
+        if event is None or event.get("action") != "READ":
+            return "Jarwis: I couldn't verify a read result to report its exact path and content."
+        if event.get("status") != "SUCCESS" or event.get("verification_status") != "VERIFIED":
+            return (
+                "Jarwis: I can't report success: the read result was not verified. "
+                f"Recorded status: {event.get('status', 'UNKNOWN')}."
+            )
+        actual = event.get("actual_result") or {}
+        if "contents" not in actual or not event.get("resolved_path"):
+            return "Jarwis: The verified read did not retain both its exact path and contents."
+        return (
+            f"Jarwis: Exact path: {event['resolved_path']}\n"
+            f"Content: {actual['contents']}"
+        )
+
     # QUIPS is structural only.  For a compound request, preserve every
     # independently identified unit by routing each through this existing
     # function.  Single requests keep the legacy path unchanged.
@@ -1414,6 +1481,38 @@ def process_input(
         for unit in quips_result.requests:
             unit_intent = unit.legacy_intent or detect_intent(unit.text)
             execution_unit = unit
+            step_id = f"step-{unit.index + 1}"
+            step_diagnostic = next(
+                (
+                    item for item in (action_plan.diagnostics if action_plan else ())
+                    if item.get("step_id") == step_id
+                    and item.get("stage") in {
+                        "validation", "ambiguity", "classification", "dependencies",
+                    }
+                ),
+                None,
+            )
+            if step_diagnostic is not None:
+                message = (
+                    f"Jarwis: I couldn't safely process step {unit.index + 1}: "
+                    f"{step_diagnostic['message']} {step_diagnostic['recovery']}"
+                )
+                responses.append(message)
+                completed_units[unit.index] = "FAILED"
+                unit_results.append(UnitProcessingResult(
+                    unit_index=unit.index,
+                    handler=unit.routing_decision,
+                    status="FAILED",
+                    error=step_diagnostic["message"],
+                ))
+                _update_anvil_step(
+                    action_plan,
+                    working_memory,
+                    unit,
+                    status="FAILED",
+                    error=step_diagnostic["message"],
+                )
+                continue
             dependency_event = (
                 working_memory.get_action_for_request(unit)
                 if working_memory is not None and unit.depends_on
@@ -1445,15 +1544,39 @@ def process_input(
                     status="SKIPPED_DEPENDENCY",
                     error=f"Dependency {failed_dependency} did not succeed.",
                 ))
+                _update_anvil_step(
+                    action_plan,
+                    working_memory,
+                    unit,
+                    status="BLOCKED",
+                    error=f"Dependency {failed_dependency} did not succeed.",
+                )
                 continue
             if (
                 dependency_event is not None
                 and dependency_event.get("status") == "SUCCESS"
+                and dependency_event.get("verification_status") == "VERIFIED"
                 and dependency_event.get("target_type") == "DIRECTORY"
                 and unit.intent == "CREATE_FILE"
                 and unit.target_reference is not None
             ):
-                dependency_directory = Path(dependency_event["resolved_path"])
+                observed = (dependency_event.get("actual_result") or {}).get("path")
+                observed = observed or dependency_event.get("resolved_path")
+                if not observed:
+                    responses.append(
+                        "Jarwis: I couldn't continue because the preceding directory "
+                        "action did not record its verified path."
+                    )
+                    completed_units[unit.index] = "FAILED"
+                    _update_anvil_step(
+                        action_plan,
+                        working_memory,
+                        unit,
+                        status="BLOCKED",
+                        error="Prerequisite has no verified path output.",
+                    )
+                    continue
+                dependency_directory = Path(observed)
                 dependency_target = dependency_directory / unit.target_reference.original_target
                 reference_context = dict(unit.target_reference.context or {})
                 reference_context["dependency_action_id"] = dependency_event["action_id"]
@@ -1466,24 +1589,82 @@ def process_input(
                         context=reference_context,
                     ),
                 )
+            elif (
+                dependency_event is not None
+                and dependency_event.get("status") == "SUCCESS"
+                and dependency_event.get("verification_status") == "VERIFIED"
+                and unit.target_reference is not None
+                and unit.target_reference.resolution_mode == ResolutionMode.CONTEXT_REFERENCE
+            ):
+                observed = (dependency_event.get("actual_result") or {}).get("path")
+                observed = observed or dependency_event.get("resolved_path")
+                if not observed:
+                    responses.append(
+                        "Jarwis: I couldn't continue because the preceding action "
+                        "did not record a verified target path."
+                    )
+                    completed_units[unit.index] = "FAILED"
+                    _update_anvil_step(
+                        action_plan,
+                        working_memory,
+                        unit,
+                        status="BLOCKED",
+                        error="Prerequisite has no verified path output.",
+                    )
+                    continue
+                reference_context = dict(unit.target_reference.context or {})
+                reference_context["reference_path"] = str(observed)
+                reference_context["dependency_action_id"] = dependency_event["action_id"]
+                execution_unit = replace(
+                    unit,
+                    target_reference=replace(
+                        unit.target_reference,
+                        original_target=str(observed),
+                        target_type=dependency_event.get("target_type") or unit.target_reference.target_type,
+                        resolution_mode=ResolutionMode.ABSOLUTE_PATH,
+                        context=reference_context,
+                    ),
+                    understanding=(
+                        replace(
+                            unit.understanding,
+                            target=str(observed),
+                            target_type=dependency_event.get("target_type") or unit.understanding.target_type,
+                            references=(),
+                            context_requirements=(),
+                            missing_information=(),
+                            is_complete=True,
+                            semantic_reasoning_required=False,
+                        )
+                        if unit.understanding is not None else None
+                    ),
+                )
+            if action_plan is not None:
+                action_plan.update_step(
+                    f"step-{unit.index + 1}",
+                    status="READY",
+                )
+                action_plan.update_step(f"step-{unit.index + 1}", status="RUNNING")
+                if working_memory is not None:
+                    working_memory.add_fact("anvil_current_step", f"step-{unit.index + 1}")
+                    working_memory.add_fact("anvil_last_plan", action_plan.to_dict())
             try:
                 response = process_input(
-                execution_unit.text, memory, tasks, unit_intent,
-                introspection_engine=introspection_engine,
-                conversation_manager=conversation_manager,
-                entity_tracker=entity_tracker,
-                reference_resolver=reference_resolver,
-                executive_layer=executive_layer,
-                brain_dispatcher=brain_dispatcher,
-                response_processor=response_processor,
-                adaptive_cloud_brain=adaptive_cloud_brain,
-                self_info_engine=self_info_engine,
-                directory_session=directory_session,
-                directory_control=directory_control,
-                preprocessor_brain=preprocessor_brain,
-                request_unit=execution_unit,
-                working_memory=working_memory,
-                semantic_reasoner=semantic_reasoner,
+                    execution_unit.text, memory, tasks, unit_intent,
+                    introspection_engine=introspection_engine,
+                    conversation_manager=conversation_manager,
+                    entity_tracker=entity_tracker,
+                    reference_resolver=reference_resolver,
+                    executive_layer=executive_layer,
+                    brain_dispatcher=brain_dispatcher,
+                    response_processor=response_processor,
+                    adaptive_cloud_brain=adaptive_cloud_brain,
+                    self_info_engine=self_info_engine,
+                    directory_session=directory_session,
+                    directory_control=directory_control,
+                    preprocessor_brain=preprocessor_brain,
+                    request_unit=execution_unit,
+                    working_memory=working_memory,
+                    semantic_reasoner=semantic_reasoner,
                 )
                 responses.append(response)
                 action_record = (
@@ -1492,12 +1673,46 @@ def process_input(
                     else None
                 )
                 status = action_record.get("status") if action_record else None
-                completed_units[unit.index] = status or "COMPLETED"
+                if execution_unit.is_target_request:
+                    completed_units[unit.index] = (
+                        status
+                        if status in {"SUCCESS", "FAILED", "PARTIAL"}
+                        else "FAILED"
+                    )
+                else:
+                    completed_units[unit.index] = "COMPLETED"
                 unit_results.append(UnitProcessingResult(
                     unit_index=unit.index,
                     handler=execution_unit.routing_decision,
-                    status=status or "COMPLETED",
+                    status=completed_units[unit.index],
                 ))
+                step_status = (
+                    "COMPLETED"
+                    if completed_units[unit.index] in {"SUCCESS", "COMPLETED"}
+                    else (
+                        "PARTIALLY_COMPLETED"
+                        if completed_units[unit.index] == "PARTIAL"
+                        else "FAILED"
+                    )
+                )
+                _update_anvil_step(
+                    action_plan,
+                    working_memory,
+                    unit,
+                    status=step_status,
+                    actual_result=(
+                        action_record.get("actual_result")
+                        if action_record else response
+                    ),
+                    error=(
+                        action_record.get("error")
+                        if action_record
+                        else (
+                            "No execution result was recorded for the target action."
+                            if execution_unit.is_target_request else None
+                        )
+                    ),
+                )
             except Exception as exc:
                 # Each unit is isolated: later requests remain routable.
                 log_event("quips_unit_failure", {"unit": unit.to_dict(), "error": str(exc)})
@@ -1509,11 +1724,41 @@ def process_input(
                     status="FAILED",
                     error=str(exc),
                 ))
+                _update_anvil_step(
+                    action_plan, working_memory, unit,
+                    status="FAILED", error=str(exc),
+                )
+        if action_plan is not None:
+            statuses = [step.execution_status for step in action_plan.steps]
+            if "PARTIALLY_COMPLETED" in statuses:
+                action_plan.status = "PARTIALLY_COMPLETED"
+            elif any(status in {"FAILED", "BLOCKED"} for status in statuses):
+                action_plan.status = (
+                    "PARTIALLY_COMPLETED" if "COMPLETED" in statuses else "FAILED"
+                )
+            elif statuses and all(status == "COMPLETED" for status in statuses):
+                action_plan.status = "COMPLETED"
+            if working_memory is not None:
+                working_memory.add_fact("anvil_last_plan", action_plan.to_dict())
         log_event("quips_compound_completed", {
             "original_text": quips_result.original_text,
             "unit_results": [result.to_dict() for result in unit_results],
         })
         return "\n\n".join(responses)
+
+    # QUIPS owns workspace-state queries even when the legacy intent label
+    # (for example, "recall") would otherwise enter a brain path.
+    if (
+        request_unit is not None
+        and request_unit.category == RequestCategory.WORKSPACE_QUERY
+        and request_unit.intent == "WORKSPACE_QUERY"
+    ):
+        _dc_for_state = directory_control if directory_control is not None else DirectoryControl()
+        return _handle_local_state_query(user_input, _dc_for_state)
+
+    if intent != "shutdown" and _route_intent(user_input).intent == Intent.LOCAL_STATE_QUERY:
+        _dc_for_state = directory_control if directory_control is not None else DirectoryControl()
+        return _handle_local_state_query(user_input, _dc_for_state)
 
     if request_unit is not None and request_unit.intent == "SEARCH_FILES":
         search_processor = preprocessor_brain or PreprocessorBrain(
@@ -1667,6 +1912,7 @@ def process_input(
             and interpretation.desired_outcome in {
                 DesiredOutcome.OPEN_TARGET,
                 DesiredOutcome.OPEN_DIRECTORY,
+                DesiredOutcome.NAVIGATE_DIRECTORY,
                 DesiredOutcome.DIRECTORY_CONTENTS,
                 DesiredOutcome.FILE_CONTENT,
                 DesiredOutcome.EXPLAIN_TARGET,
@@ -1806,8 +2052,9 @@ def process_input(
         return "shutdown"
 
     # ---- PREPROCESSOR BRAIN INTERCEPT ------------------------------------
-    # Runs BEFORE all other dispatch. Handles SELF_INFO and DIRECTORY
-    # requests deterministically without an LLM call.
+    # Handles SELF_INFO and directory-control intents deterministically.
+    # QUIPS-owned filesystem operations use TargetResolver and
+    # DirectoryControl below instead of bypassing resolution here.
     # GENERAL_LLM and UNKNOWN pass through to the existing brain path.
     # All other (memory, tasks, project, brain-mode) intents bypass this
     # entirely — the preprocessor only intercepts what it is authoritative for.
@@ -1818,6 +2065,9 @@ def process_input(
         "show_completed_tasks", "current_version", "brain_status",
         "set_brain_local", "set_brain_cloud", "set_brain_auto",
         "cloud_brain", "clear_directory", "dc_clear_directory",
+    ) and (
+        request_unit is None
+        or request_unit.category != RequestCategory.FILE_OPERATION
     ) and (
         intent != "read_directory"
         or (request_unit is not None and request_unit.category == RequestCategory.FILE_OPERATION)
@@ -1848,15 +2098,6 @@ def process_input(
                 print(f"[AG DEBUG] PreprocessorBrain error: {_pb_exc}")
             # Fall through to existing handling.
     # ---- END PREPROCESSOR BRAIN INTERCEPT --------------------------------
-
-    # ---- Intent Router short-circuit: LOCAL_STATE_QUERY answered in-memory ----
-    # This runs before all other dispatch so that active-directory queries
-    # NEVER reach the Cloud Brain regardless of what detect_intent() decided.
-    if intent not in ("shutdown",):
-        _ir = _route_intent(user_input)
-        if _ir.intent == Intent.LOCAL_STATE_QUERY:
-            _dc_for_state = directory_control if directory_control is not None else DirectoryControl()
-            return _handle_local_state_query(user_input, _dc_for_state)
 
     if intent == "self_info":
         return _handle_self_info(user_input, self_info_engine, introspection_engine)
@@ -2323,6 +2564,36 @@ def _execute_understood_filesystem_request(
                 size = f"  ({entry['size_bytes']} B)" if entry["type"] == "file" else ""
                 lines.append(f"  {marker} {entry['name']}{size}")
             return f"Jarwis: Contents of {resolved.resolved_path}:\n" + "\n".join(lines)
+
+        if outcome == DesiredOutcome.NAVIGATE_DIRECTORY:
+            try:
+                navigated = control.navigate_directory(resolved.resolved_path)
+                entries = control.list_directory(navigated)
+                update_action(
+                    action="NAVIGATE",
+                    name=Path(navigated).name,
+                    resolved_target=navigated,
+                    resolved_path=navigated,
+                    actual_result={"entries": entries},
+                    verification_status="VERIFIED",
+                    verification_evidence={
+                        "directory_exists": Path(navigated).is_dir(),
+                        "entries_returned": len(entries),
+                    },
+                    status="SUCCESS",
+                )
+                if not entries:
+                    return f"Jarwis: Active directory: {navigated} (empty)."
+                lines = []
+                for entry in entries:
+                    marker = "[D]" if entry["type"] == "dir" else "[F]"
+                    size = f"  ({entry['size_bytes']} B)" if entry["type"] == "file" else ""
+                    lines.append(f"  {marker} {entry['name']}{size}")
+                return f"Jarwis: Active directory: {navigated}\n" + "\n".join(lines)
+            except NoActiveWorkspaceError:
+                return fail_action("execution", "No active workspace is set. Set a workspace before using a relative target.")
+            except (FileNotFoundInWorkspace, NotAFileError, DirectoryControlError) as exc:
+                return fail_action("execution", str(exc))
 
         if outcome in {DesiredOutcome.CREATE_FILE, DesiredOutcome.CREATE_DIRECTORY}:
             if outcome == DesiredOutcome.CREATE_FILE:
@@ -3581,6 +3852,9 @@ def main():
         log_event("user_input_received", {"text": user_input})
         quips_result = analyze_request(user_input, detect_intent)
         log_event("quips_request_analysis", quips_result.to_dict())
+        action_plan = _executive_layer.analyze_action_plan(quips_result)
+        working_memory.add_fact("anvil_original_request", user_input)
+        working_memory.add_fact("anvil_last_plan", action_plan.to_dict())
 
         action_result = analyze_action_pattern(user_input, working_memory)
 
@@ -3610,59 +3884,132 @@ def main():
                 continue
 
         original_input = user_input
-        request_unit = quips_result.requests[0]
-        # QUIPS always invokes detect_intent and preserves its result on the
-        # unit.  For single requests this retains legacy routing unchanged;
-        # deterministic ownership is applied in process_input from the unit.
-        intent = request_unit.legacy_intent or detect_intent(user_input)
-        brain_input = user_input
-
-        if intent == "unknown" and request_unit.category in {
-            RequestCategory.EXPLANATION,
-            RequestCategory.CONVERSATION,
-        }:
-            resolved_input = resolve_followup(user_input, working_memory)
-            if resolved_input == user_input:
-                # MIGRATION NOTE: old free function `resolve_thread_reference(...)`
-                # replaced with a method call; the method itself is missing
-                # from the new WorkingMemory class. See
-                # "MISSING WORKING MEMORY METHODS".
-                resolved_input = working_memory.resolve_thread_reference(user_input)
-
-            if resolved_input != user_input:
-                brain_input = resolved_input
-                intent = detect_intent(brain_input)
-                # MIGRATION NOTE: old `working_memory.follow_up_depth += 1`
-                # attribute replaced with a temporary fact counter.
-                working_memory.add_fact(
-                    "follow_up_depth",
-                    working_memory.get_fact("follow_up_depth", 0) + 1
+        blocking_diagnostic = next(
+            (
+                item for item in action_plan.diagnostics
+                if item.get("stage") in {"structure", "parsing"}
+                or (
+                    item.get("stage") in {"classification", "dependencies"}
+                    and (
+                        item.get("step_id") is None
+                        or not quips_result.is_compound
+                    )
                 )
-                log_event("topic_continuation_detected", {
-                    "original_input": original_input,
-                    "resolved_input": brain_input,
-                    "topic": working_memory.get_topic()
-                })
-
-        response = process_input(
-            brain_input, memory, tasks, intent,
-            introspection_engine=_introspection_engine,
-            conversation_manager=_conversation_manager,
-            entity_tracker=_entity_tracker,
-            reference_resolver=_reference_resolver,
-            executive_layer=_executive_layer,
-            brain_dispatcher=_brain_dispatcher,
-            response_processor=_response_processor,
-            adaptive_cloud_brain=_adaptive_cloud_brain,
-            self_info_engine=_self_info_engine,
-            directory_session=_directory_session,
-            directory_control=_directory_control,
-            preprocessor_brain=_preprocessor_brain,
-            quips_result=quips_result,
-            request_unit=request_unit,
-            working_memory=working_memory,
-            semantic_reasoner=_semantic_interpretation_fallback,
+            ),
+            None,
         )
+        first_request = _first_quips_request(quips_result)
+        has_single_step_clarification = (
+            not quips_result.is_compound
+            and any(
+                item.get("stage") in {"validation", "ambiguity"}
+                for item in action_plan.diagnostics
+            )
+        )
+        if (
+            not action_plan.steps
+            or first_request is None
+            or blocking_diagnostic
+            or has_single_step_clarification
+        ):
+            intent = "unknown"
+            action_plan.status = "FAILED"
+            diagnostic = blocking_diagnostic or next(
+                (
+                    item for item in action_plan.diagnostics
+                    if item.get("stage") in {
+                        "validation", "ambiguity", "classification", "dependencies",
+                    }
+                ),
+                None,
+            ) or (
+                action_plan.diagnostics[0] if action_plan.diagnostics else {
+                    "stage": "parsing",
+                    "message": "No action candidates were produced.",
+                    "recovery": "Restate the request in a supported form.",
+                }
+            )
+            response = (
+                "Jarwis: I couldn't safely process this request "
+                f"({diagnostic.get('stage', 'analysis')}): "
+                f"{diagnostic.get('message', 'request analysis failed')} "
+                f"{diagnostic.get('recovery', '')}"
+            ).strip()
+            working_memory.add_fact("anvil_last_plan", action_plan.to_dict())
+        else:
+            request_unit = first_request
+            action_plan.update_step(f"step-{request_unit.index + 1}", status="READY")
+            # QUIPS preserves the legacy intent for single requests; ANVIL
+            # validates its structure before handing it to existing routing.
+            intent = request_unit.legacy_intent or detect_intent(user_input)
+            brain_input = user_input
+
+            if intent == "unknown" and request_unit.category in {
+                RequestCategory.EXPLANATION,
+                RequestCategory.CONVERSATION,
+            }:
+                resolved_input = resolve_followup(user_input, working_memory)
+                if resolved_input == user_input:
+                    resolved_input = working_memory.resolve_thread_reference(user_input)
+
+                if resolved_input != user_input:
+                    brain_input = resolved_input
+                    intent = detect_intent(brain_input)
+                    working_memory.add_fact(
+                        "follow_up_depth",
+                        working_memory.get_fact("follow_up_depth", 0) + 1
+                    )
+                    log_event("topic_continuation_detected", {
+                        "original_input": original_input,
+                        "resolved_input": brain_input,
+                        "topic": working_memory.get_topic()
+                    })
+
+            response = process_input(
+                brain_input, memory, tasks, intent,
+                introspection_engine=_introspection_engine,
+                conversation_manager=_conversation_manager,
+                entity_tracker=_entity_tracker,
+                reference_resolver=_reference_resolver,
+                executive_layer=_executive_layer,
+                brain_dispatcher=_brain_dispatcher,
+                response_processor=_response_processor,
+                adaptive_cloud_brain=_adaptive_cloud_brain,
+                self_info_engine=_self_info_engine,
+                directory_session=_directory_session,
+                directory_control=_directory_control,
+                preprocessor_brain=_preprocessor_brain,
+                quips_result=quips_result,
+                request_unit=request_unit,
+                working_memory=working_memory,
+                semantic_reasoner=_semantic_interpretation_fallback,
+                action_plan=action_plan,
+            )
+            if not quips_result.is_compound:
+                action_event = (
+                    working_memory.get_action_for_request(request_unit)
+                    if request_unit.is_target_request else None
+                )
+                if action_event and action_event.get("status") == "PARTIAL":
+                    status = "PARTIALLY_COMPLETED"
+                elif request_unit.is_target_request:
+                    status = (
+                        "COMPLETED"
+                        if action_event and action_event.get("status") == "SUCCESS"
+                        else "FAILED"
+                    )
+                else:
+                    status = "COMPLETED"
+                _update_anvil_step(
+                    action_plan,
+                    working_memory,
+                    request_unit,
+                    status=status,
+                    actual_result=action_event.get("actual_result") if action_event else None,
+                    error=action_event.get("error") if action_event else None,
+                )
+                action_plan.status = status
+                working_memory.add_fact("anvil_last_plan", action_plan.to_dict())
         response = get_persona_controller().apply_address(
             response, get_persona_controller().current_address,
         )

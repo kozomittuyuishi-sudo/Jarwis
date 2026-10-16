@@ -8,7 +8,7 @@ existing intent routing.
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Callable, Dict, List, Optional, Tuple
 
 from target_resolution_models import ActionHint, ResolutionMode, TargetReference, TargetType
@@ -47,6 +47,7 @@ class RoutingDecision:
 class DesiredOutcome:
     OPEN_TARGET = "OPEN_TARGET"
     OPEN_DIRECTORY = "OPEN_DIRECTORY"
+    NAVIGATE_DIRECTORY = "NAVIGATE_DIRECTORY"
     DIRECTORY_CONTENTS = "DIRECTORY_CONTENTS"
     FILE_CONTENT = "FILE_CONTENT"
     EXPLAIN_TARGET = "EXPLAIN_TARGET"
@@ -109,6 +110,8 @@ class RequestUnit:
     target_reference: Optional[TargetReference] = None
     destination_reference: Optional[TargetReference] = None
     understanding: Optional[RequestUnderstanding] = None
+    original_segment: Optional[str] = None
+    connectors: Tuple[str, ...] = ()
 
     @property
     def route_intent(self) -> Optional[str]:
@@ -193,6 +196,11 @@ _WORKSPACE_LIST_RE = re.compile(
     r"current\s+workspace))\b",
     re.IGNORECASE,
 )
+_NAVIGATE_TARGET_RE = re.compile(
+    r"^\s*(?:(?:go|navigate)\s+to|move\s+into)\b|"
+    r"^\s*open\b.*\s+(?:folder|directory)\b[.!?]*\s*$",
+    re.IGNORECASE,
+)
 _BARE_OPEN_TARGET_RE = re.compile(
     r"^\s*open\s+(?:the\s+)?[A-Za-z0-9_.-]+(?:\s+(?:folder|directory))?\b",
     re.IGNORECASE,
@@ -210,7 +218,8 @@ _CONTEXTUAL_FILE_ACTION_RE = re.compile(
     r"^\s*(?:read|open|write|list|show|tell\s+me\s+what(?:'s|\s+is)\s+inside|"
     r"what(?:'s|\s+is)\s+inside)\s+(?:it|this|that|the\s+(?:file|folder|directory)|"
     r"the\s+(?:older|newer|first|second|previous|last)\s+(?:file|folder|directory)|"
-    r"the\s+(?:file|folder|directory)\s+i\s+(?:created|made|opened|read)\s+earlier|"
+    r"the\s+(?:file|folder|directory)\s+i\s+(?:just\s+)?"
+    r"(?:created|made|opened|read)(?:\s+earlier)?|"
     r"the\s+thing\s+i\s+(?:created|made)\s+earlier)\b",
     re.IGNORECASE,
 )
@@ -233,6 +242,11 @@ _RESULT_EXPLANATION_RE = re.compile(
     r"what\s+happened|what\s+did\s+you\s+actually\s+do|"
     r"(?:tell|explain|describe)\s+me\s+what\s+(?:it|that|this)\s+(?:does|did|contains)|"
     r"what\s+does\s+(?:it|that|this)\s+do)\b",
+    re.IGNORECASE,
+)
+_EXACT_RESULT_RE = re.compile(
+    r"^\s*(?:tell\s+me|give\s+me|report)\s+(?:the\s+)?exact\s+"
+    r"(?:path|location)\b.*\b(?:content|contents)\b",
     re.IGNORECASE,
 )
 _CONVERSATION_RE = re.compile(
@@ -300,19 +314,22 @@ def analyze_request(
     import.  QUIPS records that existing route in ``route_intent``; it does not
     duplicate the legacy intent system.
     """
-    text = (user_input or "").strip()
+    original = user_input if isinstance(user_input, str) else ""
+    text = original.strip()
     try:
         parts = _split_independent_requests(text)
     except Exception:
         # Decomposition itself failed unexpectedly — degrade to a single
         # whole-text unit rather than losing the request entirely.
-        parts = [text] if text else []
+        parts = [(text, text)] if text else []
 
     is_compound = len(parts) > 1
     units: List[RequestUnit] = []
-    for index, part in enumerate(parts):
+    for index, (part, source_segment) in enumerate(parts):
         try:
-            units.append(_classify_unit(text, part, index, is_compound, intent_classifier))
+            units.append(_classify_unit(
+                text, part, index, is_compound, intent_classifier, source_segment,
+            ))
         except Exception as exc:
             # One unit failing to classify must not destroy its siblings'
             # results (error isolation — see design spec section 16).
@@ -329,24 +346,132 @@ def analyze_request(
                 routing_decision=RoutingDecision.LLM_FALLBACK,
                 processing_status="CLASSIFICATION_FAILED",
                 result_state=f"error: {exc}",
+                original_segment=source_segment,
             ))
-    return QUIPSResult(original_text=text, is_compound=is_compound, requests=units)
+    if original != text:
+        units = [replace(unit, original_text=original) for unit in units]
+    return QUIPSResult(original_text=original, is_compound=is_compound, requests=units)
 
 
-def _split_independent_requests(text: str) -> List[str]:
-    """Split only obvious coordinated requests; keep operational workflows whole."""
+def _split_independent_requests(text: str) -> List[Tuple[str, str]]:
+    """Split coordinated action phrases outside quotes; retain each source segment."""
     workflow = _CREATE_FOLDER_FILE_WORKFLOW.fullmatch(text)
     if workflow:
         folder = workflow.group("folder").strip().strip("\"'")
         filename = workflow.group("file").strip().strip("\"'")
-        return [f"create folder {folder}", f"create file {filename}"]
-    if not text or _WORKFLOW.search(text):
-        return [text] if text else []
+        first = f"create folder {folder}"
+        second = f"create file {filename}"
+        return [(first, first), (second, second)]
+    if not text:
+        return [(text, text)] if text else []
 
-    candidates = [part.strip(" ,") for part in _BOUNDARY.split(text) if part.strip(" ,")]
-    if len(candidates) < 2 or not all(_REQUEST_START.search(part) for part in candidates):
-        return [text]
-    return candidates
+    address = re.match(r"^\s*(?:J|Jarwis)\s*,\s*", text, re.IGNORECASE)
+    prefix = text[:address.end()] if address else ""
+    body = text[address.end():] if address else text
+    masked = _mask_quoted_text(body)
+    boundary = re.compile(
+        r"\s*,\s*(?:and\s+)?|\s+(?:and|also|then)\s+|"
+        r"(?<=[.!?])\s+(?=(?:inside|within|after|before)\b)",
+        re.IGNORECASE,
+    )
+    spans = []
+    cursor = 0
+    for match in boundary.finditer(masked):
+        if not body[cursor:match.start()].strip(" ,.!?"):
+            continue
+        spans.append((cursor, match.start()))
+        cursor = match.end()
+    spans.append((cursor, len(body)))
+    candidates = []
+    for position, (start, end) in enumerate(spans):
+        source = body[start:end].strip(" ,")
+        if position == 0:
+            source = prefix + source
+        if source:
+            command = _normalize_action_clause(source)
+            candidates.append((command, source))
+    if len(candidates) < 2:
+        source = text
+        return [(_normalize_action_clause(body), source)]
+    merged: List[Tuple[str, str]] = []
+    position = 0
+    while position < len(candidates):
+        command, source = candidates[position]
+        if (
+            not _REQUEST_START.search(command)
+            and position + 1 < len(candidates)
+            and re.match(r"^\s*(?:inside|within)\b", source, re.IGNORECASE)
+            and _REQUEST_START.search(candidates[position + 1][0])
+        ):
+            next_command, next_source = candidates[position + 1]
+            source = source + ", " + next_source
+            command = _normalize_action_clause(source)
+            position += 1
+        if _REQUEST_START.search(command):
+            merged.append((command, source))
+        elif merged:
+            previous_command, previous_source = merged[-1]
+            merged[-1] = (
+                previous_command + " " + command,
+                previous_source + " " + source,
+            )
+        else:
+            return [(_normalize_action_clause(body), text)]
+        position += 1
+    return merged if len(merged) > 1 else [(_normalize_action_clause(body), text)]
+
+
+def _mask_quoted_text(text: str) -> str:
+    """Return same-length text with quoted spans masked for safe boundary scans."""
+    characters = list(text)
+    quote = None
+    escaped = False
+    for index, character in enumerate(text):
+        if quote is not None:
+            characters[index] = " "
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+        elif character in {"'", '"'}:
+            if (
+                character == "'"
+                and index > 0
+                and index + 1 < len(text)
+                and text[index - 1].isalnum()
+                and text[index + 1].isalnum()
+            ):
+                continue
+            quote = character
+            characters[index] = " "
+    return "".join(characters)
+
+
+def extract_connectors(text: str) -> Tuple[str, ...]:
+    """Extract request-linking words while excluding quoted literal content."""
+    return tuple(dict.fromkeys(
+        match.group(0).lower()
+        for match in re.finditer(
+            r"\b(?:then|after|before|inside|within|because|and|or)\b",
+            _mask_quoted_text(text),
+            re.IGNORECASE,
+        )
+    ))
+
+
+def _normalize_action_clause(text: str) -> str:
+    command = re.sub(r"^\s*(?:J|Jarwis)\s*,\s*", "", text, flags=re.IGNORECASE)
+    command = re.sub(r"^\s*(?:then|also)\s+", "", command, flags=re.IGNORECASE)
+    command = re.sub(
+        r"^\s*(?:inside|within)\s+(?:it|that\s+folder|the\s+folder|"
+        r"that\s+directory|the\s+directory)\s*[,;]\s*",
+        "",
+        command,
+        flags=re.IGNORECASE,
+    )
+    return command.strip()
 
 
 def _classify_unit(
@@ -355,18 +480,11 @@ def _classify_unit(
     index: int,
     is_compound: bool,
     intent_classifier: Optional[Callable[[str], str]],
+    original_segment: Optional[str] = None,
 ) -> RequestUnit:
     normalized = text.lower().strip().rstrip(_TRAILING_SENTENCE_PUNCT)
     category, intent, routing_decision = _classify_broad_category(normalized)
     legacy_intent = intent_classifier(text) if intent_classifier is not None else None
-    depends_on = (
-        (index - 1,)
-        if index > 0 and (
-            intent == "EXPLAIN_RESULT"
-            or _CREATE_FOLDER_FILE_WORKFLOW.search(original_text)
-        )
-        else ()
-    )
     # Case-preserving (filenames are case-sensitive, e.g. "Brain.py"),
     # but with trailing sentence punctuation removed — computed once here
     # and reused by every extraction helper below, rather than each one
@@ -380,6 +498,23 @@ def _classify_unit(
         extraction_text, category, intent, target_reference,
         destination_reference,
     )
+    segment = original_segment if original_segment is not None else text
+    requires_dependency = (
+        intent == "EXPLAIN_RESULT"
+        or _CREATE_FOLDER_FILE_WORKFLOW.search(original_text) is not None
+        or re.match(r"^\s*(?:then|after)\b", segment, re.IGNORECASE) is not None
+        or re.match(r"^\s*(?:inside|within)\b", segment, re.IGNORECASE) is not None
+        or re.search(
+            r"\b(?:inside|within|after|before)\s+(?:it|that|the\s+folder|the\s+directory)\b",
+            segment,
+            re.IGNORECASE,
+        ) is not None
+        or (
+            target_reference is not None
+            and target_reference.resolution_mode == ResolutionMode.CONTEXT_REFERENCE
+        )
+    )
+    depends_on = (index - 1,) if index > 0 and requires_dependency else ()
     return RequestUnit(
         original_text=original_text,
         text=text,
@@ -395,6 +530,8 @@ def _classify_unit(
         target_reference=target_reference,
         destination_reference=destination_reference,
         understanding=understanding,
+        original_segment=segment,
+        connectors=extract_connectors(segment),
     )
 
 
@@ -405,18 +542,30 @@ def _classify_broad_category(text: str) -> tuple[str, str, str]:
     which remains the single source for self-info semantics.  Once ownership
     is known, it cannot be overwritten by an unrecognised legacy intent.
     """
-    self_info = route_query(text)
+    has_explicit_file_operation = bool(
+        _FILE_OPERATION_RE.search(text)
+        or _WRITE_FILE_RE.search(text)
+        or _APPEND_FILE_RE.search(text)
+        or _SEARCH_FILES_RE.search(text)
+        or _DIRECTORY_CONTENTS_RE.search(text)
+        or _EXPLAIN_FILE_RE.search(text)
+        or _CONTEXTUAL_FILE_ACTION_RE.search(text)
+    )
+    self_info = route_query(text) if not has_explicit_file_operation else None
     self_info_intents = {
         ROUTE_IDENTITY: "IDENTITY",
         ROUTE_CAPABILITIES: "CAPABILITIES",
         ROUTE_LIMITATIONS: "LIMITATIONS",
         ROUTE_ARCHITECTURE: "ARCHITECTURE",
-        ROUTE_OPERATIONAL: "BRAINS" if self_info.sub_topic == "brains" else "OPERATIONAL",
+        ROUTE_OPERATIONAL: "OPERATIONAL",
     }
-    if self_info.is_self_info and self_info.category in self_info_intents:
+    if self_info and self_info.is_self_info and self_info.category in self_info_intents:
+        self_info_intent = self_info_intents[self_info.category]
+        if self_info.category == ROUTE_OPERATIONAL and self_info.sub_topic == "brains":
+            self_info_intent = "BRAINS"
         return (
             RequestCategory.SELF_INFO,
-            self_info_intents[self_info.category],
+            self_info_intent,
             RoutingDecision.DETERMINISTIC_SELF_INFO,
         )
 
@@ -426,10 +575,12 @@ def _classify_broad_category(text: str) -> tuple[str, str, str]:
             "CONVERSATION_CONTEXT",
             RoutingDecision.LLM_FALLBACK,
         )
-    if _RESULT_EXPLANATION_RE.search(text):
+    if _EXACT_RESULT_RE.search(text) or _RESULT_EXPLANATION_RE.search(text):
         return RequestCategory.EXPLANATION, "EXPLAIN_RESULT", RoutingDecision.LLM_FALLBACK
     if _WORKSPACE_LIST_RE.search(text):
-        return RequestCategory.WORKSPACE_QUERY, "WORKSPACE_LIST", RoutingDecision.LEGACY_INTENT_ROUTER
+        return RequestCategory.FILE_OPERATION, "LIST_DIRECTORY", RoutingDecision.LEGACY_INTENT_ROUTER
+    if _NAVIGATE_TARGET_RE.search(text):
+        return RequestCategory.FILE_OPERATION, "NAVIGATE_DIRECTORY", RoutingDecision.LEGACY_INTENT_ROUTER
     if (
         _BARE_OPEN_TARGET_RE.search(text)
         or _FILE_OPERATION_RE.search(text)
@@ -491,7 +642,7 @@ def _extract_context_references(text: str) -> Tuple[str, ...]:
     """Preserve reference words for the conversation layer; never resolve them."""
     descriptors = (
         r"the\s+(?:file|folder|directory|thing|object)\s+i\s+"
-        r"(?:created|made|opened|read|changed)\s+earlier",
+        r"(?:just\s+)?(?:created|made|opened|read|changed)(?:\s+earlier)?",
         r"what\s+you\s+(?:created|made|wrote|changed)",
         r"the\s+(?:local|cloud|other)\s+one",
     )
@@ -525,8 +676,12 @@ def _infer_action_hint(text: str, intent: str) -> str:
     (e.g. "remake", "homemaker"); unlikely in short commands but cheap
     to make correct, consistent with the project's existing standard."""
     lower = text.lower()
+    if intent == "NAVIGATE_DIRECTORY":
+        return ActionHint.ACCESS
     if re.search(r"\baccess\b", lower):
         return ActionHint.ACCESS
+    if intent in {"CREATE_FILE", "CREATE_FOLDER"}:
+        return ActionHint.CREATE
     if intent == "LIST_DIRECTORY":
         return ActionHint.LIST
     if intent in {"READ_FILE", "EXPLAIN_FILE", "OPEN_TARGET"} or re.search(r"\b(?:read|open|inspect|show)\b", lower):
@@ -559,7 +714,7 @@ def _infer_target_type(target: str, intent: str) -> str:
     this hint with the actual filesystem type.
     """
     lowered = target.lower().strip()
-    if intent in {"CREATE_FOLDER", "LIST_DIRECTORY"}:
+    if intent in {"CREATE_FOLDER", "LIST_DIRECTORY", "NAVIGATE_DIRECTORY"}:
         return TargetType.DIRECTORY
     if re.search(r"\bfile\b", lowered):
         return TargetType.FILE
@@ -574,9 +729,10 @@ def _infer_target_type(target: str, intent: str) -> str:
 
 
 _OPERATION_PREFIXES = (
-    "open the ", "read the ", "access the ", "append ",
+    "open the ", "read the ", "access the ", "append ", "move into ",
 ) + tuple(f"{verb} " for verb in _FILE_OPERATION_CORE_VERBS) + (
-    "show ", "inspect ", "find ", "search ", "list ", "navigate ", "go to ",
+    "show ", "inspect ", "find ", "search ", "list ", "navigate to ",
+    "navigate ", "go to ",
 )
 
 
@@ -620,6 +776,8 @@ def _extract_target_text(text: str) -> str:
         return explanation_match.group(1).strip().strip('"\'')
 
     clean = _strip_operation_prefix(text)
+    clean = re.sub(r"^(?:the|a|an)\s+", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\s+(?:folder|directory)$", "", clean, flags=re.IGNORECASE)
     clean = re.sub(
         r"^\s*(?:tell\s+me\s+what(?:'s|\s+is)\s+inside|what(?:'s|\s+is)\s+inside)\s+",
         "", clean, flags=re.IGNORECASE,
@@ -632,7 +790,7 @@ def _extract_target_text(text: str) -> str:
 
     if re.match(
         r"^(?:the\s+)?(?:file|folder|directory)\s+i\s+"
-        r"(?:created|made|opened|read|changed)\s+earlier\b",
+        r"(?:just\s+)?(?:created|made|opened|read|changed)(?:\s+earlier)?\b",
         clean, re.IGNORECASE,
     ):
         return clean if clean.lower().startswith("the ") else "the " + clean
@@ -697,7 +855,11 @@ def _build_understanding(
         domain, outcome = "MEMORY", DesiredOutcome.MEMORY_OPERATION
     elif category == RequestCategory.EXPLANATION:
         domain, outcome = "CONVERSATION", DesiredOutcome.EXPLAIN_RESULT
-        if references or re.search(r"\b(?:created|made|wrote|changed|change|write|create)\b", text):
+        if (
+            references
+            or _EXACT_RESULT_RE.search(text)
+            or re.search(r"\b(?:created|made|wrote|changed|change|write|create)\b", text)
+        ):
             references = ("previous request result",)
             context_requirements.append("previous request result")
     elif category == RequestCategory.WORKSPACE_QUERY:
@@ -711,6 +873,7 @@ def _build_understanding(
             "APPEND_FILE": DesiredOutcome.APPEND_FILE,
             "SEARCH_FILES": DesiredOutcome.SEARCH_FILES,
             "LIST_DIRECTORY": DesiredOutcome.DIRECTORY_CONTENTS,
+            "NAVIGATE_DIRECTORY": DesiredOutcome.NAVIGATE_DIRECTORY,
             "READ_FILE": DesiredOutcome.FILE_CONTENT,
             "EXPLAIN_FILE": DesiredOutcome.EXPLAIN_FILE,
             "DELETE_TARGET": DesiredOutcome.DELETE_TARGET,
@@ -738,6 +901,7 @@ def _build_understanding(
             "MOVE_TARGET": "MOVE",
             "COPY_TARGET": "COPY",
             "OPEN_TARGET": "OPEN",
+            "NAVIGATE_DIRECTORY": "NAVIGATE",
         }
         action = action_by_intent.get(intent, intent)
 
@@ -755,6 +919,8 @@ def _build_understanding(
             context_requirements.append("previously-mentioned filesystem entity")
         if target_reference is None or not target:
             missing.append("filesystem target")
+        if intent in {"WRITE_FILE", "APPEND_FILE"} and not content:
+            missing.append("file content")
         if intent in {"RENAME_TARGET", "MOVE_TARGET", "COPY_TARGET"} and not destination:
             missing.append("operation destination")
         elif references and target_reference.resolution_mode == ResolutionMode.CONTEXT_REFERENCE:
@@ -782,6 +948,9 @@ def _build_understanding(
         and (unclassified_imperative or intent == "UNKNOWN" or first_word in {
             "open", "read", "move", "copy", "rename", "create", "make",
         })
+    ) or (
+        category == RequestCategory.FILE_OPERATION
+        and re.search(r"\bor\b", text, re.IGNORECASE) is not None
     )
     is_complete = not missing and not (
         target_reference is not None
@@ -828,7 +997,7 @@ def _detect_resolution_mode(target: str, scope: Optional[str], text: str) -> str
         return ResolutionMode.CONTEXT_REFERENCE
     if re.search(
         r"\b(?:that|this|it|the\s+(?:file|folder|directory|thing|object)\s+i\s+"
-        r"(?:created|made|opened|read|changed)\s+earlier|"
+        r"(?:just\s+)?(?:created|made|opened|read|changed)(?:\s+earlier)?|"
         r"the\s+(?:older|newer|first|second|previous|last)\s+(?:file|folder|directory))\b",
         text, re.IGNORECASE,
     ):
@@ -851,11 +1020,16 @@ def _build_target_reference(
         _extract_rename_targets(extraction_text)
         if intent in {"RENAME_TARGET", "MOVE_TARGET", "COPY_TARGET"} else None
     )
-    target = rename_parts[0] if rename_parts else _extract_target_text(extraction_text)
+    is_workspace_listing = (
+        intent == "LIST_DIRECTORY" and _WORKSPACE_LIST_RE.search(extraction_text)
+    )
+    target = "." if is_workspace_listing else (
+        rename_parts[0] if rename_parts else _extract_target_text(extraction_text)
+    )
     if not target:
         return None
 
-    scope = _extract_scope(extraction_text)
+    scope = None if is_workspace_listing else _extract_scope(extraction_text)
     resolution_mode = _detect_resolution_mode(target, scope, extraction_text)
     action = _infer_action_hint(extraction_text, intent)
     context: Dict[str, object] = {}

@@ -29,8 +29,9 @@ def _process(query, *, preprocessor=None, directory_control=None, directory_sess
 def test_workspace_list_phrases_are_classified_as_filesystem_requests():
     for query in ("what files are here?", "list this directory"):
         unit = _unit(query)
-        assert unit.category == RequestCategory.WORKSPACE_QUERY
-        assert unit.intent == "WORKSPACE_LIST"
+        assert unit.category == RequestCategory.FILE_OPERATION
+        assert unit.intent == "LIST_DIRECTORY"
+        assert unit.target_reference.original_target == "."
         assert unit.routing_decision == RoutingDecision.LEGACY_INTENT_ROUTER
 
 
